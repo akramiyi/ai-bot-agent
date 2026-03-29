@@ -1,7 +1,6 @@
 flask
-requests
-google-generativeai
-firebase-admin
 gunicorn
-pytz
+openai
+yt-dlp
 python-dotenv
+requests
