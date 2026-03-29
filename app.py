@@ -1,127 +1,165 @@
-from flask import Flask, request, jsonify, render_template_string
-from astra import ai_chat, login, get_weather, get_news
-import threading
 import os
+import re
+from flask import Flask, request, jsonify, render_template_string
+from openai import OpenAI
+import yt_dlp
+from dotenv import load_dotenv
 
+load_dotenv()
 app = Flask(__name__)
 
-# --------- MOBILE UI (HTML) ---------
-HTML_UI = """
+# ---------- NVIDIA AI ----------
+client = OpenAI(
+    base_url="https://integrate.api.nvidia.com/v1",
+    api_key=os.getenv("NVIDIA_API_KEY")
+)
+
+def ask_nvidia(prompt, system_message=None):
+    if not system_message:
+        system_message = "You are Astra, a helpful AI assistant for Akram from Chhapra, Bihar. Respond in Hinglish."
+    try:
+        response = client.chat.completions.create(
+            model="minimaxai/minimax-m2.5",
+            messages=[
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=500
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"AI error: {str(e)}"
+
+# ---------- YouTube Pro ----------
+def get_youtube_metadata(song_name):
+    try:
+        with yt_dlp.YoutubeDL({'quiet': True, 'extract_flat': True}) as ydl:
+            info = ydl.extract_info(f"ytsearch1:{song_name}", download=False)
+            if 'entries' in info and info['entries']:
+                v = info['entries'][0]
+                return {
+                    'url': f"https://www.youtube.com/watch?v={v['id']}",
+                    'title': v['title'],
+                    'thumbnail': f"https://img.youtube.com/vi/{v['id']}/0.jpg"
+                }
+    except:
+        return None
+
+playlist = []
+
+# ---------- Web UI ----------
+HTML = """
 <!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Astra AI - Level 6</title>
-    <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0b0e14; color: #00d4ff; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
-        .container { width: 90%; max-width: 400px; background: rgba(255, 255, 255, 0.05); padding: 20px; border-radius: 15px; box-shadow: 0 0 20px rgba(0, 212, 255, 0.2); border: 1px solid rgba(0, 212, 255, 0.3); }
-        h1 { text-align: center; font-size: 24px; margin-bottom: 20px; text-shadow: 0 0 10px #00d4ff; }
-        #chat-box { height: 300px; overflow-y: auto; background: rgba(0, 0, 0, 0.3); padding: 10px; border-radius: 10px; margin-bottom: 15px; display: flex; flex-direction: column; }
-        .msg { margin: 5px 0; padding: 8px 12px; border-radius: 10px; max-width: 80%; }
-        .user { align-self: flex-end; background: #00d4ff; color: #0b0e14; }
-        .astra { align-self: flex-start; background: rgba(255, 255, 255, 0.1); color: #fff; }
-        .input-area { display: flex; gap: 10px; }
-        input { flex: 1; padding: 10px; border-radius: 5px; border: none; background: #1a1f26; color: white; outline: none; }
-        button { padding: 10px 20px; border-radius: 5px; border: none; background: #00d4ff; color: #0b0e14; font-weight: bold; cursor: pointer; }
-        button:active { transform: scale(0.95); }
-    </style>
+<html>
+<head><title>Astra Level 6</title>
+<style>
+body { background: #0a0f1a; color: #e6b91e; font-family: monospace; padding: 20px; }
+.container { max-width: 800px; margin: auto; }
+.chat { background: #1a1f2e; border-radius: 12px; padding: 20px; height: 400px; overflow-y: auto; }
+.msg { margin: 10px 0; padding: 8px 12px; border-radius: 8px; }
+.user { background: #2a2f3e; text-align: right; }
+.bot { background: #0f1420; border-left: 3px solid #e6b91e; }
+input, button { background: #1a1f2e; border: 1px solid #e6b91e; color: #e6b91e; padding: 10px; border-radius: 8px; }
+button { cursor: pointer; }
+button:hover { background: #e6b91e; color: #0a0f1a; }
+</style>
 </head>
 <body>
-    <div class="container">
-        <h1>🎙️ Astra Level 6</h1>
-        <div id="chat-box"></div>
-        <div class="input-area">
-            <input type="text" id="user-input" placeholder="Ask Astra...">
-            <button onclick="sendMsg()">Send</button>
-        </div>
-    </div>
-
-    <script>
-        const chatBox = document.getElementById('chat-box');
-        const userInput = document.getElementById('user-input');
-
-        function appendMsg(text, type) {
-            const div = document.createElement('div');
-            div.className = 'msg ' + type;
-            div.innerText = text;
-            chatBox.appendChild(div);
-            chatBox.scrollTop = chatBox.scrollHeight;
-        }
-
-        async function sendMsg() {
-            const text = userInput.value.trim();
-            if (!text) return;
-
-            appendMsg(text, 'user');
-            userInput.value = '';
-
-            try {
-                const res = await fetch('/ask', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text: text })
-                });
-                const data = await res.json();
-                appendMsg(data.reply, 'astra');
-            } catch (e) {
-                appendMsg('Error connecting to Astra ❌', 'astra');
-            }
-        }
-
-        userInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') sendMsg();
+<div class="container">
+<h1>🎙️ Astra Level 6</h1>
+<div class="chat" id="chat"></div>
+<div style="display: flex; gap: 10px; margin-top: 10px;">
+<input type="text" id="input" placeholder="Ask Astra..." style="flex:1;">
+<button onclick="send()">Send</button>
+</div>
+</div>
+<script>
+const chat = document.getElementById('chat');
+function add(role, text) {
+    const div = document.createElement('div');
+    div.className = `msg ${role}`;
+    div.innerHTML = `<strong>${role === 'user' ? 'You' : 'Astra'}:</strong><br>${text}`;
+    chat.appendChild(div);
+    chat.scrollTop = chat.scrollHeight;
+}
+async function send() {
+    const input = document.getElementById('input');
+    const text = input.value.trim();
+    if (!text) return;
+    add('user', text);
+    input.value = '';
+    add('bot', '⌛ Thinking...');
+    try {
+        const res = await fetch('/ask', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({message: text})
         });
-    </script>
+        const data = await res.json();
+        const last = chat.lastChild;
+        chat.removeChild(last);
+        add('bot', data.reply || 'Sorry, no response.');
+    } catch(e) {
+        chat.removeChild(chat.lastChild);
+        add('bot', 'Network error.');
+    }
+}
+document.getElementById('input').addEventListener('keypress', (e) => e.key === 'Enter' && send());
+</script>
 </body>
 </html>
 """
 
-@app.route("/")
+@app.route('/')
 def index():
-    return render_template_string(HTML_UI)
+    return render_template_string(HTML)
 
-# --------- MOBILE AUTH ---------
-@app.route("/login", methods=["POST"])
-def api_login():
-    data = request.json
-    username = data.get("username")
-    password = data.get("password")
-    
-    if login(username, password):
-        return jsonify({"status": "success", "message": f"Welcome {username}"})
-    else:
-        return jsonify({"status": "error", "message": "Invalid Credentials"}), 401
-
-# --------- ASK ASTRA ---------
-@app.route("/ask", methods=["POST"])
+@app.route('/ask', methods=['POST'])
 def ask():
-    data = request.json
-    user_input = data.get("text")
-    username = data.get("username", "akram") # Default for mobile app
-    
+    data = request.get_json()
+    user_input = data.get('message', '').strip().lower()
     if not user_input:
-        return jsonify({"error": "No input text provided"}), 400
-    
-    # Process Command via AI
-    response = ai_chat(user_input)
-    
-    return jsonify({
-        "reply": response,
-        "status": "Astra Thinking... 🧠"
-    })
+        return jsonify({'reply': 'Please say something.'})
 
-# --------- GET INFO ---------
-@app.route("/weather", methods=["GET"])
-def weather():
-    city = request.args.get("city", "Delhi")
-    return jsonify({"info": get_weather(city)})
+    # YouTube commands
+    if user_input.startswith('play song ') or user_input.startswith('play '):
+        song = re.sub(r'^(play song |play )', '', user_input).strip()
+        if not song:
+            return jsonify({'reply': 'Which song?'})
+        meta = get_youtube_metadata(song)
+        if meta:
+            reply = f'🎵 <b>{meta["title"]}</b><br><img src="{meta["thumbnail"]}" width="200"><br><a href="{meta["url"]}" target="_blank" style="background:#ff0000;color:white;padding:8px 16px;text-decoration:none;border-radius:8px;">▶ Play on YouTube</a>'
+        else:
+            reply = f'<a href="https://www.youtube.com/results?search_query={song.replace(" ", "+")}" target="_blank">🔍 Search YouTube for "{song}"</a>'
+        return jsonify({'reply': reply})
 
-@app.route("/news", methods=["GET"])
-def news():
-    return jsonify({"articles": get_news()})
+    elif user_input.startswith('add to queue '):
+        song = user_input.replace('add to queue ', '').strip()
+        playlist.append(song)
+        return jsonify({'reply': f'✅ Added "{song}". {len(playlist)} in queue.'})
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    print(f"Astra Mobile API starting at http://0.0.0.0:{port}")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    elif user_input == 'show queue':
+        if not playlist:
+            return jsonify({'reply': 'Queue empty.'})
+        return jsonify({'reply': '📋 Queue:<br>' + '<br>'.join(f'{i+1}. {s}' for i,s in enumerate(playlist))})
+
+    elif user_input == 'play next':
+        if playlist:
+            song = playlist.pop(0)
+            meta = get_youtube_metadata(song)
+            if meta:
+                reply = f'▶ Now playing: <b>{meta["title"]}</b><br><a href="{meta["url"]}" target="_blank">Play</a>'
+            else:
+                reply = f'Now playing: {song} (link not available)'
+        else:
+            reply = 'Queue empty.'
+        return jsonify({'reply': reply})
+
+    # General AI
+    ai_reply = ask_nvidia(user_input)
+    return jsonify({'reply': ai_reply})
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)

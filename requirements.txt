@@ -3,4 +3,3 @@ gunicorn
 openai
 yt-dlp
 python-dotenv
-requests
