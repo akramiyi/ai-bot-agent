@@ -10,9 +10,12 @@ import warnings
 import threading
 warnings.filterwarnings("ignore")
 
-import google.generativeai as genai
+from openai import OpenAI
 import firebase_admin
 from firebase_admin import credentials, db
+import urllib.parse
+import yt_dlp
+from bs4 import BeautifulSoup
 
 # Optional Imports (GUI/System/Voice)
 try:
@@ -85,6 +88,14 @@ try:
 
     else:
         print("ℹ️ Firebase credentials not found. Cloud sync disabled.")
+    
+    # Initialize app with database URL if cred exists (User Fix)
+    if 'cred' in locals():
+        try:
+            firebase_admin.get_app()
+        except ValueError:
+            firebase_admin.initialize_app(cred, {'databaseURL': FB_URL})
+            print(f"🚀 Firebase Fully Initialized with {FB_URL}")
 except Exception as e:
     print(f"⚠️ Firebase Setup Info: {e}")
     print("💡 Proceeding with local memory fallback.")
@@ -119,10 +130,13 @@ def update_ui(text):
         except:
             pass
 
-# 🔥 AI STABILITY FIX
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-# Using gemini-2.5-flash (Supported in 2026)
-model = genai.GenerativeModel("gemini-2.5-flash")
+# 🔥 NVIDIA AI ENGINE (NVIDIA Integrate)
+client = OpenAI(
+    base_url="https://integrate.api.nvidia.com/v1",
+    api_key=os.getenv("NVIDIA_API_KEY")
+)
+# Using Minimax M2.5 (Free & Fast for 2026)
+MODEL_NAME = "minimaxai/minimax-m2.5"
 
 # -------- SPEAK --------
 # Use gTTS (original Hindi voice) + pygame for crash-free playback
@@ -169,65 +183,86 @@ def normalize_command(command):
 
     return command
 
-# -------- AI EXPERT --------
+# -------- PRO YOUTUBE SYSTEM --------
+def get_youtube_info(song_name):
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'extract_flat': True,
+            'force_generic_extractor': False,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Search for the video
+            search_query = f"ytsearch1:{song_name}"
+            info = ydl.extract_info(search_query, download=False)
+            if 'entries' in info and len(info['entries']) > 0:
+                video = info['entries'][0]
+                video_id = video['id']
+                return {
+                    "title": video.get('title', song_name),
+                    "url": f"https://www.youtube.com/watch?v={video_id}",
+                    "thumb": f"https://img.youtube.com/vi/{video_id}/0.jpg",
+                    "id": video_id
+                }
+    except Exception as e:
+        print(f"yt-dlp error: {e}")
+    
+    # Fallback to search link
+    query = urllib.parse.quote(song_name)
+    return {
+        "title": song_name,
+        "url": f"https://www.youtube.com/results?search_query={query}",
+        "thumb": "https://www.youtube.com/s/desktop/28169112/img/favicon_144x144.png",
+        "id": None
+    }
+
+def get_suggestions(query):
+    try:
+        url = f"https://suggestqueries.google.com/complete/search?client=firefox&q={urllib.parse.quote(query)}"
+        resp = requests.get(url, timeout=5).json()
+        return resp[1][:5] if len(resp) > 1 else []
+    except:
+        return []
+
+# -------- PLAYLIST QUEUE --------
+playlist_queue = []
+current_queue_index = 0
+
+# -------- AI EXPERT (NVIDIA) --------
 def ai_chat(prompt):
     try:
-        full_prompt = f"""
-You are Astra, an advanced AI assistant with persistent long-term memory.
+        system_prompt = f"""
+You are Astra, an advanced AI assistant created for Akram.
 Reply short, smart, and helpful. Maximum 2 lines.
 
-Memory Instruction:
-Store the following user and family profile permanently. Use it for personalization, context awareness, and intelligent assistance.
-
 User Profile:
-- Name: Akram Ansari
-- Role: Aspiring Software Engineer 
+- Name: Akram Ansari | Role: Aspiring Software Engineer 
 - Location: Chhapra, Bihar, India
 - Phone: +91 6204110766 | Email: meakramiyi@gmail.com
 - LinkedIn: linkedin.com/in/akram-alii
-- Education: B.Tech in Computer Science (2024–2028), Brainware University; 10th: 69%; 12th: 65%
-- Skills: Java, Python, JavaScript, HTML, CSS, Node.js (Basic), Git, GitHub, VS Code, Postman
-- Projects: Personal Portfolio Website
-- Languages: Hindi (Fluent), English (Fluent)
+- Education: B.Tech in CS (2024–2028), Brainware University
 
 Family & Friends:
-- Father: Ajmat Ali
-- Mother: Maimun Nisha
-- Sister: Raushan Khatoon
-- Brother: Ekram Ali
-- Sister's Husband: Nadeem Akhtar
-- Sister's Son: Zidaan Akhtar
-- Best Friend: Rosidul Islam (Lives in Bandipur, expert at booking tickets)
-- Friend (Nickname "Russian"): Munshi Insiyat (International Karate Player)
-- Friend (Nickname "Motu Bhai"): Arjit Ghost (Extremely rich guy, left Mukesh Ambani behind)
-- Special Friend: Aryan Raj (Video editor, expert in After Effects, lives in Dhanbad)
-- Friend: Kaif Ali (Crazy about a girl, from Jharkhand)
-- Friend: Nayan Guchchhait (Great friend, from Jharkhand)
-- Friend: Shahid Afridi (Great friend, from Jharkhand)
-- Friend: Wasim Akram (From Kolkata)
-- Friend: Kunaal Sen
-- Friend: Asif Naalaa (Crazy friend, running behind a girl for 2 years, from Kolkata)
+- Father: Ajmat Ali | Mother: Maimun Nisha
+- Siblings: Raushan Khatoon (Sister), Ekram Ali (Brother)
+- Friends: Rosidul Islam (Best Friend), Munshi Insiyat (Karate), Arjit Ghost (Rich), Aryan Raj (Editor), Kaif Ali, Nayan, Shahid, Wasim, Kunaal, Asif.
 
-Memory Rules:
-Always remember the user as "Akram". Use family context when relevant (e.g., reminders, greetings, personal queries).
-Personalize responses deeply using user + family data. Do not forget this information unless explicitly told.
-
-User: {prompt}
+Instruction:
+Always remember you are talking to Akram. Use Hindi-English mix (Hinglish) if natural.
 """
-        response = model.generate_content(full_prompt, request_options={"timeout": 10})
-
-        if response and hasattr(response, "text"):
-            return response.text.strip()
-        else:
-            return "No response"
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=250
+        )
+        return response.choices[0].message.content.strip()
     except Exception as e:
-        error_msg = str(e)
-        print(f"❌ Gemini Error Trace: {error_msg}")
-        if "429" in error_msg or "quota" in error_msg.lower():
-            return "quota_exceeded"
-        elif "model not found" in error_msg.lower() or "not_found" in error_msg.lower():
-            return "Model Error ❌ (Check name: gemini-2.5-flash)"
-        return f"AI error (Ref: {error_msg[:20]}...)"
+        print(f"❌ NVIDIA Error: {e}")
+        return "AI system currently busy. ⚠️"
 
 # -------- LISTEN --------
 def listen():
@@ -262,7 +297,28 @@ def load_memory():
     except:
         return {}
 
-def save_memory(memory, username="akram"):
+# --- NEW MEMORY SYSTEM (User Fix) ---
+def save_memory(key, value):
+    """Save a specific key-value pair to Firebase."""
+    try:
+        ref = db.reference("memory")
+        ref.update({key: value})
+        print(f"💾 Saved to Cloud: {key} = {value}")
+    except Exception as e:
+        print(f"❌ Cloud Save Error: {e}")
+
+def get_memory(key):
+    """Retrieve a specific key from Firebase."""
+    try:
+        ref = db.reference("memory")
+        data = ref.get()
+        return data.get(key) if data else None
+    except Exception as e:
+        print(f"❌ Cloud Load Error: {e}")
+        return None
+
+def save_full_memory(memory, username="akram"):
+    """Existing full memory save (local + cloud sync)."""
     # Save Local
     with open(MEMORY_FILE, "w") as f:
         json.dump(memory, f, indent=4)
@@ -347,7 +403,7 @@ def face_login():
 def learn_from_user(command):
     memory["history"] = memory.get("history", [])
     memory["history"].append(command)
-    save_memory(memory)
+    save_full_memory(memory)
 
 # -------- MULTI-AGENT SYSTEM --------
 def study_agent(command):
@@ -394,6 +450,21 @@ def process_command(command):
     study_agent(command)
     system_agent(command)
 
+    # --- MEMORY COMMANDS (User Fix) ---
+    if "mera bhai ka naam" in command:
+        name = command.split("naam")[-1].strip()
+        save_memory("bhai", name)
+        speak("Theek hai, maine yaad rakh liya 👍")
+        return
+
+    elif "who is ekram" in command:
+        bhai = get_memory("bhai")
+        if bhai:
+            speak(f"{bhai} aapka chhota bhai hai 😎")
+        else:
+            speak("Mujhe abhi tak nahi pata ki Ekram kaun hai.")
+        return
+
     # -------- TIME --------
     if "time" in command:
 
@@ -423,26 +494,69 @@ def process_command(command):
     elif "play" in command:
         song = command.replace("play", "").replace("song", "").strip()
         if song == "":
-            speak("What should I play?")
+            return "Which song would you like to play? 🎵"
+        
+        info = get_youtube_info(song)
+        
+        # PRO LEVEL HTML Response
+        card = f'''
+<div style="background: rgba(255, 0, 0, 0.1); border: 2px solid #ff0000; padding: 15px; border-radius: 15px; text-align: center; margin-top: 10px;">
+    <h3 style="margin: 0 0 10px 0; color: #fff;">🎵 Now Playing</h3>
+    <img src="{info['thumb']}" style="width: 100%; border-radius: 10px; margin-bottom: 15px; box-shadow: 0 0 15px rgba(255,0,0,0.5);">
+    <p style="color: #00d4ff; font-weight: bold;">{info['title']}</p>
+    <a href="{info['url']}" target="_blank" style="display: inline-block; background: #ff0000; color: white; padding: 10px 25px; text-decoration: none; border-radius: 25px; font-weight: bold; font-size: 16px; box-shadow: 0 4px 10px rgba(0,0,0,0.3); transition: 0.3s;">▶ Play on YouTube</a>
+</div>
+'''
+        if IS_SERVER:
+            return card
         else:
-            speak(f"Playing {song} 🎵")
             try:
-                # Auto-play mode!
                 if pywhatkit:
                     pywhatkit.playonyt(song)
                 else:
-                    webbrowser.open(f"https://www.youtube.com/results?search_query={song}")
-            except Exception as e:
-                print("Music error:", e)
-                speak("Music auto-play nahi ho paya, search results dekh lijiye")
-                webbrowser.open(f"https://www.youtube.com/results?search_query={song}")
+                    webbrowser.open(info['url'])
+                return f"Playing {info['title']} 🎵"
+            except:
+                return f"Auto-play failed. Click here: {info['url']}"
+
+    elif "add to queue" in command or "queue me add" in command:
+        song = command.replace("add to queue", "").replace("queue me add", "").strip()
+        if not song: return "Song name bolo?"
+        info = get_youtube_info(song)
+        playlist_queue.append(info)
+        return f"✅ '{info['title']}' added to queue. {len(playlist_queue)} songs in playlist."
+
+    elif "show queue" in command or "list dikhao" in command:
+        if not playlist_queue: return "Queue khali hai 📋"
+        res = "<b>📋 Queue List:</b><br>"
+        for i, s in enumerate(playlist_queue):
+            res += f"{i+1}. {s['title']}<br>"
+        return res
+
+    elif "play next" in command or "agla gaana" in command:
+        global current_queue_index
+        if current_queue_index < len(playlist_queue) - 1:
+            current_queue_index += 1
+            info = playlist_queue[current_queue_index]
+            return f"Playing next: {info['title']} 🎵<br><a href='{info['url']}' target='_blank'>▶ Play</a>"
+        return "Queue khatam ho gayi! 📋"
+
+    elif "suggest" in command or "did you mean" in command:
+        query = command.replace("suggest", "").replace("did you mean", "").strip()
+        suggestions = get_suggestions(query)
+        if suggestions:
+            res = "🔍 <b>Did you mean?</b><br>"
+            for s in suggestions:
+                res += f"• {s}<br>"
+            return res
+        return "No suggestions found."
 
     # -------- SAVE NOTES --------
     elif "yaad rakho" in command:
         data = command.replace("yaad rakho", "").strip()
         memory["notes"] = memory.get("notes", [])
         memory["notes"].append(data)
-        save_memory(memory)
+        save_full_memory(memory)
         speak("Maine yaad rakh liya 🧠")
 
     # -------- RECALL NOTES --------
@@ -458,7 +572,7 @@ def process_command(command):
     elif "my name is" in command:
         name = command.replace("my name is", "").strip()
         memory["name"] = name
-        save_memory(memory)
+        save_full_memory(memory)
         speak(f"Got it, {name}. I'll remember that.")
 
     # -------- GET NAME --------
@@ -472,7 +586,7 @@ def process_command(command):
     elif "i like" in command:
         pref = command.replace("i like", "").strip()
         memory["preference"] = pref
-        save_memory(memory)
+        save_full_memory(memory)
         speak(f"Saved that you like {pref} 👍")
 
     # -------- GET PREFERENCE --------
@@ -493,7 +607,7 @@ def process_command(command):
                 memory["friends"] = []
 
             memory["friends"].append(name)
-            save_memory(memory)
+            save_full_memory(memory)
 
             speak(f"{name} ko yaad rakh liya 👍")
 
@@ -509,7 +623,7 @@ def process_command(command):
                 memory["contacts"] = {}
 
             memory["contacts"][name] = number
-            save_memory(memory)
+            save_full_memory(memory)
 
             speak(f"{name} ka number save ho gaya 📱")
         else:

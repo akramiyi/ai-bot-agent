@@ -1,5 +1,6 @@
 import os
 import re
+import json
 from flask import Flask, request, jsonify, render_template_string
 from openai import OpenAI
 import yt_dlp
@@ -7,6 +8,72 @@ from dotenv import load_dotenv
 
 load_dotenv()
 app = Flask(__name__)
+
+MEMORY_FILE = 'memory.json'
+
+# ---------- Memory Functions ----------
+def load_memory():
+    """Load memory from JSON file, return dict."""
+    if os.path.exists(MEMORY_FILE):
+        try:
+            with open(MEMORY_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_memory(memory):
+    """Save memory dict to JSON file."""
+    with open(MEMORY_FILE, 'w') as f:
+        json.dump(memory, f, indent=2)
+
+def update_memory_from_text(text, memory):
+    """Extract facts from user message and update memory."""
+    text_lower = text.lower()
+    # Example rules
+    if 'meri sister' in text_lower or 'meri bahan' in text_lower:
+        parts = text.split()
+        for i, word in enumerate(parts):
+            if word.lower() in ['hai', 'hain'] and i+1 < len(parts):
+                name = " ".join(parts[i+1:]).strip(' .!,?')
+                memory['sister'] = name
+                return f"✅ Yaad rakha ki aapki sister {name} hain."
+    
+    if 'mera jija' in text_lower or 'mera brother in law' in text_lower:
+        parts = text.split()
+        for i, word in enumerate(parts):
+            if word.lower() in ['hai', 'hain'] and i+1 < len(parts):
+                name = " ".join(parts[i+1:]).strip(' .!,?')
+                memory['jija'] = name
+                return f"✅ Yaad rakha ki aapke jija {name} hain."
+    
+    if 'my name is' in text_lower or 'mera naam' in text_lower:
+        parts = text.split()
+        for i, word in enumerate(parts):
+            if word.lower() in ['is', 'hai'] and i+1 < len(parts):
+                name = " ".join(parts[i+1:]).strip(' .!,?')
+                memory['user_name'] = name
+                return f"✅ Yaad rakha ki aapka naam {name} hai."
+    
+    # Generic "yaad rakho" command
+    if text_lower.startswith('yaad rakho '):
+        fact = text[11:].strip()
+        if '=' in fact:
+            key, val = fact.split('=', 1)
+            memory[key.strip()] = val.strip()
+        else:
+            memory['last_fact'] = fact
+        return f"✅ Maine yaad rakh liya: {fact}"
+    return None
+
+def build_system_prompt(memory):
+    """Create system prompt including all stored facts."""
+    prompt = "You are Astra, a helpful AI assistant for Akram from Chhapra, Bihar. Respond in Hinglish.\n"
+    if memory:
+        prompt += "\nImportant facts you must remember:\n"
+        for key, value in memory.items():
+            prompt += f"- {key}: {value}\n"
+    return prompt
 
 # ---------- NVIDIA AI ----------
 client = OpenAI(
@@ -118,9 +185,27 @@ def index():
 @app.route('/ask', methods=['POST'])
 def ask():
     data = request.get_json()
-    user_input = data.get('message', '').strip().lower()
+    user_input_raw = data.get('message', '').strip()
+    user_input = user_input_raw.lower()
     if not user_input:
-        return jsonify({'reply': 'Please say something.'})
+        return jsonify({'reply': 'Kuch boliye.'})
+
+    # Memory handling
+    memory = load_memory()
+
+    # Special command: kya yaad hai
+    if user_input == 'kya yaad hai':
+        if not memory:
+            return jsonify({'reply': "Meri memory abhi khali hai. Aap kuch batao, main yaad rakhunga."})
+        else:
+            reply = "Mujhe yeh yaad hai:<br>" + "<br>".join([f"- {k}: {v}" for k,v in memory.items()])
+            return jsonify({'reply': reply})
+
+    # Check if user wants to teach something
+    update_msg = update_memory_from_text(user_input_raw, memory)
+    if update_msg:
+        save_memory(memory)
+        return jsonify({'reply': update_msg})
 
     # YouTube commands
     if user_input.startswith('play song ') or user_input.startswith('play '):
@@ -156,8 +241,11 @@ def ask():
             reply = 'Queue empty.'
         return jsonify({'reply': reply})
 
+    # Build system prompt with memory
+    system_prompt = build_system_prompt(memory)
+
     # General AI
-    ai_reply = ask_nvidia(user_input)
+    ai_reply = ask_nvidia(user_input_raw, system_prompt)
     return jsonify({'reply': ai_reply})
 
 if __name__ == '__main__':
