@@ -1,22 +1,55 @@
-import speech_recognition as sr
-import pyttsx3
 import datetime
 import json
 import os
-import pywhatkit
 import pytz
-import pyautogui
 import time
 import webbrowser
 import requests
 import xml.etree.ElementTree as ET
 import warnings
+import threading
 warnings.filterwarnings("ignore")
+
 import google.generativeai as genai
-from gtts import gTTS
-import ctypes
 import firebase_admin
 from firebase_admin import credentials, db
+
+# Optional Imports (GUI/System/Voice)
+try:
+    import speech_recognition as sr
+except ImportError:
+    sr = None
+
+try:
+    import pyttsx3
+except ImportError:
+    pyttsx3 = None
+
+try:
+    import pywhatkit
+except ImportError:
+    pywhatkit = None
+
+try:
+    import pyautogui
+except ImportError:
+    pyautogui = None
+
+try:
+    from gtts import gTTS
+except ImportError:
+    gTTS = None
+
+try:
+    import ctypes
+except ImportError:
+    ctypes = None
+
+try:
+    os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "1"
+    import pygame
+except ImportError:
+    pygame = None
 
 # -------- FIREBASE CLOUD MEMORY --------
 FB_URL = 'https://astra-ai-2cc5a-default-rtdb.asia-southeast1.firebasedatabase.app'
@@ -77,15 +110,14 @@ model = genai.GenerativeModel("gemini-1.5-flash")
 # -------- SPEAK --------
 # Use gTTS (original Hindi voice) + pygame for crash-free playback
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "1"
-import pygame
-try:
-    pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
-except:
-    pygame.mixer.init()
-
 def speak(text):
     print(f"🔊 Astra Speaking: {text}")
     update_ui(f"Speaking: {text}")
+    
+    if gTTS is None or pygame is None:
+        print("ℹ️ Voice output (speaker) is not available on this system.")
+        return
+
     try:
         tts = gTTS(text=text, lang='hi')
         tts.save("voice.mp3")
@@ -180,20 +212,25 @@ User: {prompt}
 
 # -------- LISTEN --------
 def listen():
+    if sr is None:
+        print("🎙️ Mic system is not available on this system.")
+        return ""
+
     update_ui("Listening... 🎙️")
     r = sr.Recognizer()
-    with sr.Microphone() as source:
-        print("🎙️ Adjusting for ambient noise...")
-        r.adjust_for_ambient_noise(source, duration=0.8)
-        print("🎧 Ready! Speak now...")
-        audio = r.listen(source, phrase_time_limit=10) # 10s for password
-
     try:
+        with sr.Microphone() as source:
+            print("🎙️ Adjusting for ambient noise...")
+            r.adjust_for_ambient_noise(source, duration=0.8)
+            print("🎧 Ready! Speak now...")
+            audio = r.listen(source, phrase_time_limit=10) # 10s for password
+
         command = r.recognize_google(audio, language="en-IN").lower()
         command = normalize_command(command)
         print("You:", command)
         return command
-    except:
+    except Exception as e:
+        print(f"Mic error: {e}")
         return ""
 
 # -------- MEMORY FILE --------
@@ -372,7 +409,10 @@ def process_command(command):
             speak(f"Playing {song} 🎵")
             try:
                 # Auto-play mode!
-                pywhatkit.playonyt(song)
+                if pywhatkit:
+                    pywhatkit.playonyt(song)
+                else:
+                    webbrowser.open(f"https://www.youtube.com/results?search_query={song}")
             except Exception as e:
                 print("Music error:", e)
                 speak("Music auto-play nahi ho paya, search results dekh lijiye")
@@ -472,21 +512,24 @@ def process_command(command):
                 speak(f"{name} ko message bhej raha hoon 💬")
 
                 try:
-                    # Step 1: Open WhatsApp + type message
-                    pywhatkit.sendwhatmsg_instantly(number, msg, wait_time=15, tab_close=False)
+                    if pywhatkit and pyautogui:
+                        # Step 1: Open WhatsApp + type message
+                        pywhatkit.sendwhatmsg_instantly(number, msg, wait_time=15, tab_close=False)
 
-                    # Step 2: EXTRA WAIT (very important 🔥)
-                    time.sleep(10)
+                        # Step 2: EXTRA WAIT (very important 🔥)
+                        time.sleep(10)
 
-                    # Step 3: Make sure window active
-                    pyautogui.click()
+                        # Step 3: Make sure window active
+                        pyautogui.click()
 
-                    # Step 4: Press enter multiple times (guarantee send)
-                    pyautogui.press("enter")
-                    time.sleep(1)
-                    pyautogui.press("enter")
+                        # Step 4: Press enter multiple times (guarantee send)
+                        pyautogui.press("enter")
+                        time.sleep(1)
+                        pyautogui.press("enter")
 
-                    speak("Message sent successfully ✅")
+                        speak("Message sent successfully ✅")
+                    else:
+                        speak("System integration (Automation) is not available on this system.")
 
                 except Exception as e:
                     print(e)
@@ -550,22 +593,28 @@ def process_command(command):
 
     # -------- SCREENSHOT --------
     elif "screenshot" in command:
-        speak("Taking screenshot 📸")
-        img = pyautogui.screenshot()
-        img.save("screenshot.png")
+        if pyautogui:
+            speak("Taking screenshot 📸")
+            img = pyautogui.screenshot()
+            img.save("screenshot.png")
+        else:
+            speak("Screenshot feature is not available on this system.")
 
     # -------- VOLUME --------
     elif "volume up" in command:
-        pyautogui.press("volumeup")
-        speak("Volume up 🔊")
+        if pyautogui:
+            pyautogui.press("volumeup")
+            speak("Volume up 🔊")
 
     elif "volume down" in command:
-        pyautogui.press("volumedown")
-        speak("Volume down 🔉")
+        if pyautogui:
+            pyautogui.press("volumedown")
+            speak("Volume down 🔉")
 
     elif "mute" in command:
-        pyautogui.press("volumemute")
-        speak("Muted 🔇")
+        if pyautogui:
+            pyautogui.press("volumemute")
+            speak("Muted 🔇")
 
     # -------- WEATHER --------
     elif "weather" in command or "mausam" in command:
