@@ -3,3 +3,7 @@ gunicorn
 openai
 yt-dlp
 python-dotenv
+firebase-admin
+requests
+beautifulsoup4
+pytz

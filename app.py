@@ -5,9 +5,25 @@ from flask import Flask, request, jsonify, render_template_string
 from openai import OpenAI
 import yt_dlp
 from dotenv import load_dotenv
+import firebase_admin
+from firebase_admin import credentials, db
 
 load_dotenv()
 app = Flask(__name__)
+
+# --- FIREBASE CLOUD MEMORY SETUP ---
+FB_URL = os.getenv("FIREBASE_DB_URL") or 'https://astra-ai-2cc5a-default-rtdb.asia-southeast1.firebasedatabase.app'
+try:
+    if not firebase_admin._apps:
+        if os.getenv("FIREBASE_CREDENTIALS"):
+            firebase_data = json.loads(os.getenv("FIREBASE_CREDENTIALS"))
+            cred = credentials.Certificate(firebase_data)
+            firebase_admin.initialize_app(cred, {'databaseURL': FB_URL})
+        elif os.path.exists("firebase.json"):
+            cred = credentials.Certificate("firebase.json")
+            firebase_admin.initialize_app(cred, {'databaseURL': FB_URL})
+except Exception as e:
+    print(f"Firebase Init Error: {e}")
 
 MEMORY_FILE = 'memory.json'
 
@@ -190,15 +206,22 @@ def ask():
     if not user_input:
         return jsonify({'reply': 'Kuch boliye.'})
 
-    # Memory handling
-    memory = load_memory()
+    # Memory handling (Cloud First)
+    try:
+        memory = db.reference("memory").get() or {}
+    except:
+        memory = load_memory() # Fallback to local JSON
 
     # Special command: kya yaad hai
     if user_input == 'kya yaad hai':
         if not memory:
             return jsonify({'reply': "Meri memory abhi khali hai. Aap kuch batao, main yaad rakhunga."})
         else:
-            reply = "Mujhe yeh yaad hai:<br>" + "<br>".join([f"- {k}: {v}" for k,v in memory.items()])
+            # If it's a dict, format it. If it's already a string, show it.
+            if isinstance(memory, dict):
+                reply = "Mujhe yeh yaad hai:<br>" + "<br>".join([f"- {k}: {v}" for k,v in memory.items()])
+            else:
+                reply = f"Mujhe yeh yaad hai: {memory}"
             return jsonify({'reply': reply})
 
     # Check if user wants to teach something
@@ -241,11 +264,20 @@ def ask():
             reply = 'Queue empty.'
         return jsonify({'reply': reply})
 
-    # Build system prompt with memory
+    # Build system prompt with memory (Injecting into user prompt as per "Final Fix")
     system_prompt = build_system_prompt(memory)
+    
+    # 🥇 FINAL FIX: PROMPT ME MEMORY INJECT KARO
+    cloud_memory = memory # We already fetched it above
+    full_user_prompt = f"""
+User Memory:
+{cloud_memory}
 
+User Question:
+{user_input_raw}
+"""
     # General AI
-    ai_reply = ask_nvidia(user_input_raw, system_prompt)
+    ai_reply = ask_nvidia(full_user_prompt, system_prompt)
     return jsonify({'reply': ai_reply})
 
 if __name__ == '__main__':
