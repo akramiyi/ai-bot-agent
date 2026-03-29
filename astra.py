@@ -107,8 +107,8 @@ def update_ui(text):
         except:
             pass
 
-genai.configure(api_key="")
-model = genai.GenerativeModel("gemini-1.5-flash")
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY") or "")
+model = genai.GenerativeModel("gemini-1.5-flash-latest")
 
 # -------- SPEAK --------
 # Use gTTS (original Hindi voice) + pygame for crash-free playback
