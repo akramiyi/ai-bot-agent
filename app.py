@@ -41,7 +41,7 @@ def generate_image(prompt):
     """Generate image using Grok's free image API."""
     grok_key = os.getenv("GROK_API_KEY")
     if not grok_key:
-        return None
+        return {"error": "GROK_API_KEY not set. Please add it in Render environment variables."}
 
     grok_client = OpenAI(
         base_url="https://api.x.ai/v1",
@@ -55,10 +55,10 @@ def generate_image(prompt):
             n=1,
             response_format="url"
         )
-        return response.data[0].url
+        return {"url": response.data[0].url}
     except Exception as e:
         print(f"Grok image error: {e}")
-        return None
+        return {"error": f"Image generation failed: {str(e)}"}
 
 # ---------- Emotion Detection ----------
 def detect_emotion(text):
@@ -599,11 +599,11 @@ def ask():
         if not prompt:
             reply = "What should I draw?"
         else:
-            img_url = generate_image(prompt)
-            if img_url:
-                reply = f"Here's an image for '{prompt}':<br><img src='{img_url}' style='max-width:100%; border-radius:12px;'>"
+            result = generate_image(prompt)
+            if result.get("url"):
+                reply = f"Here's an image for '{prompt}':<br><img src='{result['url']}' style='max-width:100%; border-radius:12px;'>"
             else:
-                reply = "Sorry, I couldn't generate that image. Please try again."
+                reply = f"⚠️ {result.get('error', 'Unknown error generating image.')}"
         return jsonify({'reply': reminder_msg + reply if reminder_msg else reply})
 
     # YouTube commands
