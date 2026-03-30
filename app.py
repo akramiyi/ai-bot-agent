@@ -101,8 +101,8 @@ Family & Friends:
 - Siblings: Raushan Khatoon (Sister), Ekram Ali (Brother)
 - Friends: Rosidul Islam (Best Friend), Munshi Insiyat (Karate), Arjit Ghost (Rich), Aryan Raj (Editor), Kaif Ali, Nayan, Shahid, Wasim, Kunaal, Asif.
 
-Instruction:
-Always remember you are talking to Akram. Use Hindi-English mix (Hinglish) if natural.
+Always remember you are talking to Akram. Use Hindi-English mix (Hinglish). 
+When the user says hello or greets you, always greet back with: 'Asalamlekuim Akram! How can I help you today?'
 """
     if memory:
         prompt += "\nUser Memory/Facts:\n"
@@ -121,7 +121,11 @@ client = OpenAI(
 
 def ask_nvidia(prompt, system_message=None):
     if not system_message:
-        system_message = "You are Astra, a helpful AI assistant for Akram from Chhapra, Bihar. Respond in Hinglish."
+        system_message = (
+            "You are Astra, a helpful AI assistant for Akram from Chhapra, Bihar. "
+            "When the user says hello, greet with 'Asalamlekuim Akram! How can I help you today?' "
+            "Respond in Hinglish."
+        )
     try:
         response = client.chat.completions.create(
             model="minimaxai/minimax-m2.5",
