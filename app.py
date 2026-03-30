@@ -444,6 +444,11 @@ HTML = """
             return div;
         }
 
+        // Add initial greeting message from Astra
+        window.addEventListener('load', () => {
+            addMessage('bot', '🖖 Asalamlekuim Akram! How can I help you today? 😊');
+        });
+
         async function send() {
             const text = input.value.trim();
             if (!text) return;
