@@ -38,16 +38,35 @@ def ask_nvidia(prompt, system_message=None):
 
 # ---------- Image Generation ----------
 def generate_image(prompt):
-    """Generate an image using NVIDIA's free flux-schnell model."""
+    """Generate an image using NVIDIA's flux-schnell model."""
+    api_key = os.getenv('NVIDIA_API_KEY')
+    if not api_key:
+        return None
+
+    url = "https://integrate.api.nvidia.com/v1/images/generations"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "black-forest-labs/flux-schnell",
+        "prompt": prompt,
+        "width": 512,
+        "height": 512,
+        "num_images": 1
+    }
+
     try:
-        response = client.images.generate(
-            model="black-forest-labs/flux-schnell",
-            prompt=prompt,
-            n=1,
-            size="512x512"
-        )
-        return response.data[0].url
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        if response.status_code == 200:
+            data = response.json()
+            if "data" in data and len(data["data"]) > 0:
+                return data["data"][0]["url"]
+        else:
+            print(f"Image generation failed: {response.status_code} - {response.text}")
+            return None
     except Exception as e:
+        print(f"Image generation error: {e}")
         return None
 
 # ---------- Emotion Detection ----------
