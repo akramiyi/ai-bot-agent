@@ -495,6 +495,7 @@ def index():
 
 @app.route('/ask', methods=['POST'])
 def ask():
+    global conversation_history
     data = request.get_json()
     user_input_raw = data.get('message', '').strip()
     user_input = user_input_raw.lower()
@@ -587,7 +588,6 @@ User Question:
     
     # Trim history
     if len(conversation_history) > MAX_HISTORY:
-        global conversation_history
         conversation_history = conversation_history[-MAX_HISTORY:]
         
     return jsonify({'reply': ai_reply})
