@@ -39,31 +39,14 @@ def ask_nvidia(prompt, system_message=None):
 
 # ---------- Image Generation ----------
 def generate_image(prompt):
-    """Generate image using Grok's free image API, with Pollinations.ai fallback."""
-    grok_key = os.getenv("GROK_API_KEY")
-    if not grok_key:
-        # 🟢 Fallback to Pollinations.ai (No key needed)
-        encoded_prompt = urllib.parse.quote(prompt)
-        return {"url": f"https://image.pollinations.ai/prompt/{encoded_prompt}"}
-
-    grok_client = OpenAI(
-        base_url="https://api.x.ai/v1",
-        api_key=grok_key
-    )
-
+    """Generate an image using Pollinations.ai (free, no key)."""
     try:
-        response = grok_client.images.generate(
-            model="grok-2-image",
-            prompt=prompt,
-            n=1,
-            response_format="url"
-        )
-        return {"url": response.data[0].url}
-    except Exception as e:
-        print(f"Grok image error: {e}")
-        # 🟢 Fallback on failure
         encoded_prompt = urllib.parse.quote(prompt)
+        # Return the URL in a dictionary to match the /ask route expectation
         return {"url": f"https://image.pollinations.ai/prompt/{encoded_prompt}"}
+    except Exception as e:
+        print(f"Image generation error: {e}")
+        return {"error": f"Failed to encode prompt: {str(e)}"}
 
 # ---------- Emotion Detection ----------
 def detect_emotion(text):
