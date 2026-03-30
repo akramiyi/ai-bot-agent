@@ -7,3 +7,4 @@ firebase-admin
 requests
 beautifulsoup4
 pytz
+dateparser

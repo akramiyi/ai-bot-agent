@@ -1,6 +1,8 @@
 import os
 import re
 import json
+import requests
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, render_template_string
 from openai import OpenAI
 # import yt_dlp moved to function for memory optimization
@@ -159,6 +161,45 @@ def get_youtube_metadata(song_name):
 playlist = []
 MAX_HISTORY = 20
 conversation_history = []
+
+# --- Reminder System ---
+reminders = []
+
+def add_reminder(time_str, message):
+    """Parse time string and add reminder."""
+    from dateparser import parse
+    parsed_time = parse(time_str, settings={'PREFER_DATES_FROM': 'future'})
+    if not parsed_time:
+        return False, "Sorry, I couldn't understand the time. Please use format like '5 PM' or 'tomorrow 8 AM'."
+    reminders.append({'time': parsed_time, 'message': message})
+    return True, f"⏰ Reminder set for {parsed_time.strftime('%I:%M %p on %b %d')}: {message}"
+
+def check_reminders():
+    """Return list of due reminders and remove them."""
+    now = datetime.now()
+    due = [r for r in reminders if r['time'] <= now]
+    reminders[:] = [r for r in reminders if r['time'] > now]
+    return due
+
+# --- Weather ---
+def get_weather(city):
+    """Fetch weather from OpenWeatherMap."""
+    api_key = os.getenv('WEATHER_API_KEY')
+    if not api_key:
+        return "Weather API key missing. Please set WEATHER_API_KEY in environment."
+    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
+    try:
+        resp = requests.get(url, timeout=5)
+        data = resp.json()
+        if data.get('cod') != 200:
+            return f"City '{city}' not found. Please check spelling."
+        temp = data['main']['temp']
+        feels = data['main']['feels_like']
+        desc = data['weather'][0]['description']
+        humidity = data['main']['humidity']
+        return f"🌤 Weather in {city.title()}: {temp}°C (feels {feels}°C), {desc}, humidity {humidity}%."
+    except Exception as e:
+        return f"Weather error: {e}"
 
 
 # ---------- Web UI ----------
@@ -409,6 +450,7 @@ HTML = """
         <div class="input-area">
             <input type="text" id="input" placeholder="Ask Astra..." autocomplete="off">
             <button onclick="send()">SEND</button>
+            <button onclick="startVoice()" id="micBtn" title="Voice Input">🎤</button>
         </div>
     </div>
 
@@ -489,6 +531,40 @@ HTML = """
         input.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') send();
         });
+
+        // Voice Input
+        let recognition = null;
+        function startVoice() {
+            if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+                addMessage('bot', 'Sorry, your browser does not support voice input.');
+                return;
+            }
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            recognition = new SpeechRecognition();
+            recognition.lang = 'hi-IN';
+            recognition.interimResults = false;
+            const micBtn = document.getElementById('micBtn');
+            micBtn.style.background = '#ff4444';
+            micBtn.textContent = '🔴';
+            recognition.onresult = (event) => {
+                const text = event.results[0][0].transcript;
+                input.value = text;
+                micBtn.style.background = '';
+                micBtn.textContent = '🎤';
+                send();
+            };
+            recognition.onerror = (event) => {
+                console.error(event);
+                micBtn.style.background = '';
+                micBtn.textContent = '🎤';
+                addMessage('bot', 'Voice recognition error. Please try again.');
+            };
+            recognition.onend = () => {
+                micBtn.style.background = '';
+                micBtn.textContent = '🎤';
+            };
+            recognition.start();
+        }
     </script>
 </body>
 </html>
@@ -507,29 +583,57 @@ def ask():
     if not user_input:
         return jsonify({'reply': 'Kuch boliye.'})
 
+    # Check for due reminders on every request
+    due = check_reminders()
+    reminder_msg = ""
+    if due:
+        reminder_msg = "🔔 <b>Reminders:</b><br>" + "<br>".join([f"- {r['message']} (at {r['time'].strftime('%I:%M %p')})" for r in due]) + "<br><br>"
+
     # Memory handling (Cloud First)
     try:
         memory = db.reference("memory").get() or {}
     except:
         memory = load_memory() # Fallback to local JSON
 
+    # --- Weather Command ---
+    if user_input.startswith('weather in ') or user_input.startswith('weather '):
+        city = user_input.replace('weather in ', '').replace('weather ', '').strip()
+        reply = get_weather(city)
+        return jsonify({'reply': reminder_msg + reply if reminder_msg else reply})
+
+    # --- Reminder Command ---
+    if user_input.startswith('remind me '):
+        text = user_input[10:].strip()
+        match = re.search(r'(?:at|on)?\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm))', text, re.IGNORECASE)
+        if match:
+            time_str = match.group(1)
+            message = text.replace(match.group(0), '').strip()
+            if message.startswith('to '):
+                message = message[3:].strip()
+            if not message:
+                message = "reminder"
+            success, result = add_reminder(time_str, message)
+            reply = result
+        else:
+            reply = "I couldn't understand the time. Please use format like 'remind me at 5 PM to call mom'."
+        return jsonify({'reply': reminder_msg + reply if reminder_msg else reply})
+
     # Special command: kya yaad hai
     if user_input == 'kya yaad hai':
         if not memory:
-            return jsonify({'reply': "Meri memory abhi khali hai. Aap kuch batao, main yaad rakhunga."})
+            return jsonify({'reply': reminder_msg + "Meri memory abhi khali hai. Aap kuch batao, main yaad rakhunga."})
         else:
-            # If it's a dict, format it. If it's already a string, show it.
             if isinstance(memory, dict):
                 reply = "Mujhe yeh yaad hai:<br>" + "<br>".join([f"- {k}: {v}" for k,v in memory.items()])
             else:
                 reply = f"Mujhe yeh yaad hai: {memory}"
-            return jsonify({'reply': reply})
+            return jsonify({'reply': reminder_msg + reply if reminder_msg else reply})
 
     # Check if user wants to teach something
     update_msg = update_memory_from_text(user_input_raw, memory)
     if update_msg:
         save_memory(memory)
-        return jsonify({'reply': update_msg})
+        return jsonify({'reply': reminder_msg + update_msg if reminder_msg else update_msg})
 
     # YouTube commands
     if user_input.startswith('play song ') or user_input.startswith('play '):
@@ -565,11 +669,10 @@ def ask():
             reply = 'Queue empty.'
         return jsonify({'reply': reply})
 
-    # Build system prompt with memory (Injecting into user prompt as per "Final Fix")
+    # Build system prompt with memory
     system_prompt = build_system_prompt(memory)
     
-    # 🥇 FINAL FIX: PROMPT ME MEMORY + HISTORY INJECT KARO
-    cloud_memory = memory # We already fetched it above
+    cloud_memory = memory
     
     # Format global history for context
     history_str = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in conversation_history])
@@ -587,6 +690,9 @@ User Question:
     # General AI
     ai_reply = ask_nvidia(full_user_prompt, system_prompt)
     
+    # Prepend due reminders to AI reply
+    final_reply = (reminder_msg + ai_reply) if reminder_msg else ai_reply
+    
     # Add to rolling history
     conversation_history.append({"role": "user", "content": user_input_raw})
     conversation_history.append({"role": "assistant", "content": ai_reply})
@@ -595,7 +701,7 @@ User Question:
     if len(conversation_history) > MAX_HISTORY:
         conversation_history = conversation_history[-MAX_HISTORY:]
         
-    return jsonify({'reply': ai_reply})
+    return jsonify({'reply': final_reply})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
