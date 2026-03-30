@@ -7,6 +7,7 @@ from flask import Flask, request, jsonify, render_template_string
 from openai import OpenAI
 import yt_dlp
 from dotenv import load_dotenv
+import urllib.parse
 from dateparser import parse
 
 load_dotenv()
@@ -38,10 +39,12 @@ def ask_nvidia(prompt, system_message=None):
 
 # ---------- Image Generation ----------
 def generate_image(prompt):
-    """Generate image using Grok's free image API."""
+    """Generate image using Grok's free image API, with Pollinations.ai fallback."""
     grok_key = os.getenv("GROK_API_KEY")
     if not grok_key:
-        return {"error": "GROK_API_KEY not set. Please add it in Render environment variables."}
+        # 🟢 Fallback to Pollinations.ai (No key needed)
+        encoded_prompt = urllib.parse.quote(prompt)
+        return {"url": f"https://image.pollinations.ai/prompt/{encoded_prompt}"}
 
     grok_client = OpenAI(
         base_url="https://api.x.ai/v1",
@@ -58,7 +61,9 @@ def generate_image(prompt):
         return {"url": response.data[0].url}
     except Exception as e:
         print(f"Grok image error: {e}")
-        return {"error": f"Image generation failed: {str(e)}"}
+        # 🟢 Fallback on failure
+        encoded_prompt = urllib.parse.quote(prompt)
+        return {"url": f"https://image.pollinations.ai/prompt/{encoded_prompt}"}
 
 # ---------- Emotion Detection ----------
 def detect_emotion(text):
