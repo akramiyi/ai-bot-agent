@@ -2,17 +2,24 @@ import os
 import re
 import json
 import requests
+import urllib.parse
+import threading
+import time
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, render_template_string
 from openai import OpenAI
 import yt_dlp
 from dotenv import load_dotenv
-import urllib.parse
 from dateparser import parse
 
 load_dotenv()
 
 app = Flask(__name__)
+
+# ---------- Configuration ----------
+PROFILES_DIR = 'profiles'       # folder for user profiles
+REMINDER_CHECK_INTERVAL = 3600  # seconds (1 hour)
+os.makedirs(PROFILES_DIR, exist_ok=True)
 
 # ---------- NVIDIA AI Client ----------
 client = OpenAI(
@@ -37,51 +44,168 @@ def ask_nvidia(prompt, system_message=None):
     except Exception as e:
         return f"AI error: {str(e)}"
 
-# ---------- Image Generation ----------
-def generate_image(prompt):
-    """Generate an image using Pollinations.ai (free, no key)."""
+# ---------- Web Search (DuckDuckGo) ----------
+def web_search(query):
+    """Perform a DuckDuckGo search and return a summary + link."""
     try:
-        encoded_prompt = urllib.parse.quote(prompt)
-        # Return the URL in a dictionary to match the /ask route expectation
-        return {"url": f"https://image.pollinations.ai/prompt/{encoded_prompt}"}
+        # Use DuckDuckGo's free, no-key instant answer API
+        url = "https://api.duckduckgo.com/"
+        params = {
+            "q": query,
+            "format": "json",
+            "no_html": 1,
+            "skip_disambig": 1
+        }
+        response = requests.get(url, params=params, timeout=10)
+        data = response.json()
+        if data.get("AbstractText"):
+            summary = data["AbstractText"]
+            link = data.get("AbstractURL", "")
+            return f"🔍 {summary}\n\nRead more: {link}" if link else f"🔍 {summary}"
+        elif data.get("RelatedTopics"):
+            # fallback to first related topic
+            first = data["RelatedTopics"][0]
+            if "Text" in first:
+                return f"🔍 {first['Text']}"
+        return f"Sorry, I couldn't find detailed info on '{query}'. You can search directly at https://duckduckgo.com/?q={urllib.parse.quote(query)}"
     except Exception as e:
-        print(f"Image generation error: {e}")
-        return {"error": f"Failed to encode prompt: {str(e)}"}
+        return f"Search error: {e}"
 
-# ---------- Emotion Detection ----------
-def detect_emotion(text):
-    """Return 'happy', 'sad', 'angry', or 'neutral' based on simple keywords."""
+# ---------- User Profile Management ----------
+def get_profile_file(user):
+    return os.path.join(PROFILES_DIR, f"{user}.json")
+
+def load_profile(user="akram"):
+    file = get_profile_file(user)
+    if os.path.exists(file):
+        with open(file, 'r') as f:
+            return json.load(f)
+    # Default profile
+    return {
+        "name": user.capitalize(),
+        "memory": {},
+        "graph": {},
+        "reminders": [],
+        "theme": "default",
+        "conversation": []
+    }
+
+def save_profile(user, data):
+    with open(get_profile_file(user), 'w') as f:
+        json.dump(data, f, indent=2)
+
+# ---------- Reminder Helpers ----------
+def add_reminder(user, time_str, message):
+    parsed = parse(time_str, settings={'PREFER_DATES_FROM': 'future'})
+    if not parsed:
+        return False, "Sorry, I couldn't understand the time."
+    profile = load_profile(user)
+    profile["reminders"].append({
+        "time": parsed.isoformat(),
+        "message": message
+    })
+    save_profile(user, profile)
+    return True, f"Reminder set for {parsed.strftime('%I:%M %p on %b %d')}: {message}"
+
+def check_reminders(user):
+    profile = load_profile(user)
+    now = datetime.now()
+    due = []
+    new_reminders = []
+    for r in profile["reminders"]:
+        dt = datetime.fromisoformat(r["time"])
+        if dt <= now:
+            due.append(r)
+        else:
+            new_reminders.append(r)
+    profile["reminders"] = new_reminders
+    save_profile(user, profile)
+    return due
+
+# ---------- Proactive Reminder Thread ----------
+reminder_notifications = []  # list of (user, message)
+def reminder_monitor():
+    while True:
+        time.sleep(REMINDER_CHECK_INTERVAL)
+        # In a real multi-user scenario, we would scan all profiles.
+        # For simplicity, we'll scan all .json files in profiles/
+        for f in os.listdir(PROFILES_DIR):
+            if f.endswith('.json'):
+                user = f[:-5]
+                due = check_reminders(user)
+                for r in due:
+                    reminder_notifications.append((user, r["message"]))
+        # Also check the default profile if not already covered
+        default_profile = os.path.join(PROFILES_DIR, "akram.json")
+        if not os.path.exists(default_profile):
+            due = check_reminders("akram")
+            for r in due:
+                reminder_notifications.append(("akram", r["message"]))
+
+# Start background thread
+threading.Thread(target=reminder_monitor, daemon=True).start()
+
+# ---------- Knowledge Graph Functions (per user) ----------
+def update_graph(user, text):
+    profile = load_profile(user)
+    graph = profile["graph"]
     text_lower = text.lower()
-    if any(w in text_lower for w in ['sad', 'depressed', 'unhappy', 'upset']):
-        return 'sad'
-    if any(w in text_lower for w in ['angry', 'frustrated', 'annoyed']):
-        return 'angry'
-    if any(w in text_lower for w in ['happy', 'joy', 'excited', 'great']):
-        return 'happy'
-    return 'neutral'
+    if 'meri sister' in text_lower or 'meri bahan' in text_lower:
+        parts = text.split()
+        for i, word in enumerate(parts):
+            if word in ['hai', 'hain'] and i+1 < len(parts):
+                name = parts[i+1].strip(' .!,?')
+                graph['Akram'] = graph.get('Akram', {})
+                graph['Akram']['sister'] = name
+                save_profile(user, profile)
+                return f"✅ Yaad rakha: Akram ki sister {name} hain."
+    if 'mera jija' in text_lower or 'mera brother in law' in text_lower:
+        parts = text.split()
+        for i, word in enumerate(parts):
+            if word in ['hai', 'hain'] and i+1 < len(parts):
+                name = parts[i+1].strip(' .!,?')
+                graph['Akram'] = graph.get('Akram', {})
+                graph['Akram']['jija'] = name
+                save_profile(user, profile)
+                return f"✅ Yaad rakha: Akram ke jija {name} hain."
+    return None
 
-# ---------- Morning Briefing ----------
-def morning_briefing():
-    """Return a morning greeting with weather, reminders, quote, and song suggestion."""
-    weather = get_weather("Chhapra") if os.getenv('WEATHER_API_KEY') else "Weather not available."
-    due = check_reminders()
-    reminder_text = ""
-    if due:
-        reminder_text = "🔔 Reminders:\n" + "\n".join([f"- {r['message']} (at {r['time'].strftime('%I:%M %p')})" for r in due])
-    else:
-        reminder_text = "No reminders for today."
-    quote = get_motivational_quote()
-    song_suggestion = "How about listening to 'Jawan'? 🎵"
-    return f"🌞 Good morning, Akram!\n\n{weather}\n\n{reminder_text}\n\n💡 {quote}\n\n🎵 {song_suggestion}"
+def query_graph(user, query):
+    profile = load_profile(user)
+    graph = profile["graph"]
+    q = query.lower()
+    if 'sister' in q:
+        sister = graph.get('Akram', {}).get('sister')
+        if sister:
+            return f"Aapki sister {sister} hain."
+    if 'jija' in q or 'brother in law' in q:
+        jija = graph.get('Akram', {}).get('jija')
+        if jija:
+            return f"Aapke jija {jija} hain."
+    return None
 
-def get_motivational_quote():
-    quotes = [
-        "The only way to do great work is to love what you do. – Steve Jobs",
-        "Believe you can and you're halfway there. – Theodore Roosevelt",
-        "Start where you are. Use what you have. Do what you can. – Arthur Ashe"
-    ]
-    import random
-    return random.choice(quotes)
+# ---------- Image Generation (Pollinations) ----------
+def generate_image(prompt):
+    import urllib.parse
+    encoded = urllib.parse.quote(prompt)
+    return f"https://image.pollinations.ai/prompt/{encoded}"
+
+# ---------- YouTube ----------
+def get_youtube_metadata(song_name):
+    try:
+        with yt_dlp.YoutubeDL({'quiet': True, 'extract_flat': True}) as ydl:
+            info = ydl.extract_info(f"ytsearch1:{song_name}", download=False)
+            if 'entries' in info and info['entries']:
+                v = info['entries'][0]
+                return {
+                    'url': f"https://www.youtube.com/watch?v={v['id']}",
+                    'title': v['title'],
+                    'thumbnail': f"https://img.youtube.com/vi/{v['id']}/0.jpg"
+                }
+    except:
+        return None
+
+playlist = []  # per‑session queue, could be moved to profile later
 
 # ---------- Weather ----------
 def get_weather(city):
@@ -100,98 +224,45 @@ def get_weather(city):
     except:
         return "Weather service error."
 
-# ---------- Reminders ----------
-reminders = []
+# ---------- Emotion Detection (keyword) ----------
+def detect_emotion(text):
+    text_lower = text.lower()
+    if any(w in text_lower for w in ['sad', 'depressed', 'unhappy', 'upset']):
+        return 'sad'
+    if any(w in text_lower for w in ['angry', 'frustrated', 'annoyed']):
+        return 'angry'
+    if any(w in text_lower for w in ['happy', 'joy', 'excited', 'great']):
+        return 'happy'
+    return 'neutral'
 
-def add_reminder(time_str, message):
-    parsed = parse(time_str, settings={'PREFER_DATES_FROM': 'future'})
-    if not parsed:
-        return False, "Sorry, I couldn't understand the time."
-    reminders.append({'time': parsed, 'message': message})
-    return True, f"Reminder set for {parsed.strftime('%I:%M %p on %b %d')}: {message}"
+# ---------- Morning Briefing ----------
+def morning_briefing(user):
+    profile = load_profile(user)
+    # Weather for default city (Chhapra)
+    weather = get_weather("Chhapra") if os.getenv('WEATHER_API_KEY') else "Weather not available."
+    # Reminders
+    due = check_reminders(user)
+    reminder_text = ""
+    if due:
+        reminder_text = "🔔 Reminders:\n" + "\n".join([f"- {r['message']} (at {datetime.fromisoformat(r['time']).strftime('%I:%M %p')})" for r in due])
+    else:
+        reminder_text = "No reminders for today."
+    # Quote
+    import random
+    quotes = [
+        "The only way to do great work is to love what you do. – Steve Jobs",
+        "Believe you can and you're halfway there. – Theodore Roosevelt",
+        "Start where you are. Use what you have. Do what you can. – Arthur Ashe"
+    ]
+    quote = random.choice(quotes)
+    # Song suggestion
+    song_suggestion = "How about listening to 'Jawan'? 🎵"
+    return f"🌞 Good morning, {profile['name']}!\n\n{weather}\n\n{reminder_text}\n\n💡 {quote}\n\n🎵 {song_suggestion}"
 
-def check_reminders():
-    now = datetime.now()
-    due = [r for r in reminders if r['time'] <= now]
-    reminders[:] = [r for r in reminders if r['time'] > now]
-    return due
-
-# ---------- Knowledge Graph ----------
-GRAPH_FILE = 'graph.json'
-def load_graph():
-    if os.path.exists(GRAPH_FILE):
-        with open(GRAPH_FILE, 'r') as f:
-            return json.load(f)
-    return {}
-
-def save_graph(graph):
-    with open(GRAPH_FILE, 'w') as f:
-        json.dump(graph, f, indent=2)
-
-def update_graph(user_input, graph):
-    """Extract simple relationships like 'X is Y' or 'X's Y is Z'."""
-    text = user_input.lower()
-    if 'meri sister' in text or 'meri bahan' in text:
-        parts = text.split()
-        for i, word in enumerate(parts):
-            if word in ['hai', 'hain'] and i+1 < len(parts):
-                name = parts[i+1].strip(' .!,?')
-                graph['Akram'] = graph.get('Akram', {})
-                graph['Akram']['sister'] = name
-                return f"✅ Yaad rakha: Akram ki sister {name} hain."
-    if 'mera jija' in text or 'mera brother in law' in text:
-        parts = text.split()
-        for i, word in enumerate(parts):
-            if word in ['hai', 'hain'] and i+1 < len(parts):
-                name = parts[i+1].strip(' .!,?')
-                graph['Akram'] = graph.get('Akram', {})
-                graph['Akram']['jija'] = name
-                return f"✅ Yaad rakha: Akram ke jija {name} hain."
-    return None
-
-def query_graph(query, graph):
-    """Answer based on stored relationships."""
-    q = query.lower()
-    if 'sister' in q:
-        sister = graph.get('Akram', {}).get('sister')
-        if sister:
-            return f"Aapki sister {sister} hain."
-    if 'jija' in q or 'brother in law' in q:
-        jija = graph.get('Akram', {}).get('jija')
-        if jija:
-            return f"Aapke jija {jija} hain."
-    return None
-
-# ---------- YouTube ----------
-def get_youtube_metadata(song_name):
-    try:
-        with yt_dlp.YoutubeDL({'quiet': True, 'extract_flat': True}) as ydl:
-            info = ydl.extract_info(f"ytsearch1:{song_name}", download=False)
-            if 'entries' in info and info['entries']:
-                v = info['entries'][0]
-                return {
-                    'url': f"https://www.youtube.com/watch?v={v['id']}",
-                    'title': v['title'],
-                    'thumbnail': f"https://img.youtube.com/vi/{v['id']}/0.jpg"
-                }
-    except:
-        return None
-
-playlist = []
-
-# ---------- Dynamic UI Themes ----------
-THEME_FILE = 'theme.json'
-def load_theme():
-    if os.path.exists(THEME_FILE):
-        with open(THEME_FILE, 'r') as f:
-            return json.load(f)
-    return {'primary': '#e6b91e', 'secondary': '#ffaa33', 'bg_gradient': 'radial-gradient(circle at 20% 30%, #0a0f1a, #03060c)'}
-
-def save_theme(theme):
-    with open(THEME_FILE, 'w') as f:
-        json.dump(theme, f, indent=2)
-
-def apply_theme(theme_name):
+# ---------- Dynamic Themes ----------
+def load_theme(user):
+    profile = load_profile(user)
+    theme_name = profile.get("theme", "default")
     themes = {
         'cyberpunk': {
             'primary': '#00ff9d',
@@ -209,13 +280,16 @@ def apply_theme(theme_name):
             'bg_gradient': 'radial-gradient(circle at 20% 30%, #0a0f1a, #03060c)'
         }
     }
-    theme = themes.get(theme_name, themes['default'])
-    save_theme(theme)
-    return theme
+    return themes.get(theme_name, themes['default'])
 
-# ---------- Frontend HTML ----------
-HTML = """
-<!DOCTYPE html>
+def set_theme(user, theme_name):
+    profile = load_profile(user)
+    profile["theme"] = theme_name
+    save_profile(user, profile)
+    return load_theme(user)
+
+# ---------- HTML (same as before, but we'll embed it) ----------
+HTML = \"\"\"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -413,6 +487,7 @@ HTML = """
         }
     </style>
     <script>
+        // Stars generation
         window.addEventListener('load', () => {
             const starsContainer = document.getElementById('stars');
             for (let i = 0; i < 150; i++) {
@@ -434,7 +509,7 @@ HTML = """
     <div class="stars" id="stars"></div>
     <div class="container">
         <div class="header">
-            <h1>▲ ASTRA LEVEL 6</h1>
+            <h1>▲ ASTRA LEVEL 7</h1>
             <div class="badge">CINEMATIC INTERFACE | NVIDIA CORE</div>
         </div>
         <div class="chat" id="chat"></div>
@@ -483,6 +558,7 @@ HTML = """
                 const reply = data.reply || 'No response.';
                 if (typingDiv) typingDiv.remove();
                 addMessage('bot', reply);
+                // Apply theme if returned
                 if (data.theme) {
                     document.documentElement.style.setProperty('--primary', data.theme.primary);
                     document.documentElement.style.setProperty('--secondary', data.theme.secondary);
@@ -519,11 +595,12 @@ HTML = """
     </script>
 </body>
 </html>
-"""
+\"\"\"
 
 @app.route('/')
 def index():
-    theme = load_theme()
+    # default user = akram; we can later add cookie based selection
+    theme = load_theme("akram")
     return render_template_string(HTML, theme=theme)
 
 @app.route('/ask', methods=['POST'])
@@ -533,42 +610,61 @@ def ask():
     if not user_input:
         return jsonify({'reply': 'Kuch boliye.'})
 
+    # Detect user from query param or cookie? For now, default "akram"
+    # In a real multi-user system, you would pass ?user=raushan in URL
+    # For simplicity, we'll accept "switch user <name>" command
+    global current_user
+    if not hasattr(app, 'current_user'):
+        app.current_user = "akram"
+    if user_input.startswith('switch user '):
+        new_user = user_input[12:].strip().lower()
+        app.current_user = new_user
+        # Create profile if not exists
+        load_profile(new_user)  # ensures file exists
+        return jsonify({'reply': f"Switched to profile: {new_user.capitalize()}"})
+
+    user = app.current_user
+
+    # Check for any pending proactive reminders for this user
+    global reminder_notifications
+    pending = [msg for (u, msg) in reminder_notifications if u == user]
+    reminder_notifications = [(u, msg) for (u, msg) in reminder_notifications if u != user]
+    reminder_msg = ""
+    if pending:
+        reminder_msg = "🔔 **Proactive Reminder:**\\n" + "\\n".join(pending) + "\\n\\n"
+
     # 1. Theme change command
-    if user_input.lower().startswith('set theme '):
-        theme_name = user_input.lower().replace('set theme ', '').strip()
-        theme = apply_theme(theme_name)
+    if user_input.startswith('set theme '):
+        theme_name = user_input[10:].strip()
+        theme = set_theme(user, theme_name)
         return jsonify({'reply': f"Theme changed to {theme_name}.", 'theme': theme})
 
     # 2. Morning briefing
     if user_input.lower() in ['good morning', 'morning', 'subah']:
-        reply = morning_briefing()
-        return jsonify({'reply': reply})
-
-    # 3. Knowledge Graph: Update or query
-    graph = load_graph()
-    update_msg = update_graph(user_input, graph)
-    if update_msg:
-        save_graph(graph)
-        return jsonify({'reply': update_msg})
-    graph_answer = query_graph(user_input, graph)
-    if graph_answer:
-        return jsonify({'reply': graph_answer})
-
-    # 4. Check for due reminders
-    due = check_reminders()
-    reminder_msg = ""
-    if due:
-        reminder_msg = "🔔 <b>Reminders:</b><br>" + "<br>".join([f"- {r['message']} (at {r['time'].strftime('%I:%M %p')})" for r in due]) + "<br><br>"
-
-    # 5. Special commands
-    if user_input.lower().startswith('weather in ') or user_input.lower().startswith('weather '):
-        city = user_input.lower().replace('weather in ', '').replace('weather ', '').strip()
-        reply = get_weather(city)
+        reply = morning_briefing(user)
         return jsonify({'reply': reminder_msg + reply if reminder_msg else reply})
 
-    elif user_input.lower().startswith('remind me '):
+    # 3. Web search
+    if user_input.startswith('search '):
+        query = user_input[7:].strip()
+        if not query:
+            reply = "What would you like to search?"
+        else:
+            reply = web_search(query)
+        return jsonify({'reply': reminder_msg + reply if reminder_msg else reply})
+
+    # 4. Knowledge Graph update/query
+    graph_update = update_graph(user, user_input)
+    if graph_update:
+        return jsonify({'reply': reminder_msg + graph_update if reminder_msg else graph_update})
+    graph_answer = query_graph(user, user_input)
+    if graph_answer:
+        return jsonify({'reply': reminder_msg + graph_answer if reminder_msg else graph_answer})
+
+    # 5. Reminders
+    if user_input.startswith('remind me '):
         text = user_input[10:].strip()
-        match = re.search(r'(?:at|on)?\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm))', text, re.IGNORECASE)
+        match = re.search(r'(?:at|on)?\\s*(\\d{1,2}(?::\\d{2})?\\s*(?:am|pm))', text, re.IGNORECASE)
         if match:
             time_str = match.group(1)
             message = text.replace(match.group(0), '').strip()
@@ -576,27 +672,31 @@ def ask():
                 message = message[3:].strip()
             if not message:
                 message = "reminder"
-            success, result = add_reminder(time_str, message)
+            success, result = add_reminder(user, time_str, message)
             reply = result if success else f"Error: {result}"
         else:
             reply = "Please use format like 'remind me at 5 PM to call mom'."
         return jsonify({'reply': reminder_msg + reply if reminder_msg else reply})
 
-    elif user_input.lower().startswith('draw ') or user_input.lower().startswith('generate '):
-        prompt = user_input.lower().replace('draw ', '').replace('generate ', '').strip()
+    # 6. Weather
+    if user_input.startswith('weather in ') or user_input.startswith('weather '):
+        city = user_input.replace('weather in ', '').replace('weather ', '').strip()
+        reply = get_weather(city)
+        return jsonify({'reply': reminder_msg + reply if reminder_msg else reply})
+
+    # 7. Image generation
+    if user_input.startswith('draw ') or user_input.startswith('generate '):
+        prompt = user_input.replace('draw ', '').replace('generate ', '').strip()
         if not prompt:
             reply = "What should I draw?"
         else:
-            result = generate_image(prompt)
-            if result.get("url"):
-                reply = f"Here's an image for '{prompt}':<br><img src='{result['url']}' style='max-width:100%; border-radius:12px;'>"
-            else:
-                reply = f"⚠️ {result.get('error', 'Unknown error generating image.')}"
+            img_url = generate_image(prompt)
+            reply = f"🎨 Here's an image for '{prompt}':<br><img src='{img_url}' style='max-width:100%; border-radius:12px;'>"
         return jsonify({'reply': reminder_msg + reply if reminder_msg else reply})
 
-    # YouTube commands
-    if user_input.lower().startswith('play song ') or user_input.lower().startswith('play '):
-        song = re.sub(r'^(play song |play )', '', user_input.lower()).strip()
+    # 8. YouTube commands
+    if user_input.startswith('play song ') or user_input.startswith('play '):
+        song = re.sub(r'^(play song |play )', '', user_input).strip()
         if not song:
             return jsonify({'reply': 'Which song?'})
         meta = get_youtube_metadata(song)
@@ -606,20 +706,20 @@ def ask():
             reply = f'<a href="https://www.youtube.com/results?search_query={song.replace(" ", "+")}" target="_blank">🔍 Search YouTube for "{song}"</a>'
         return jsonify({'reply': reminder_msg + reply if reminder_msg else reply})
 
-    elif user_input.lower().startswith('add to queue '):
-        song = user_input.lower().replace('add to queue ', '').strip()
+    # 9. Queue (global, not per‑user for simplicity)
+    global playlist
+    if user_input.startswith('add to queue '):
+        song = user_input.replace('add to queue ', '').strip()
         playlist.append(song)
         reply = f'✅ Added "{song}". {len(playlist)} in queue.'
         return jsonify({'reply': reminder_msg + reply if reminder_msg else reply})
-
-    elif user_input.lower() == 'show queue':
+    elif user_input == 'show queue':
         if not playlist:
             reply = 'Queue empty.'
         else:
             reply = '📋 Queue:<br>' + '<br>'.join(f'{i+1}. {s}' for i,s in enumerate(playlist))
         return jsonify({'reply': reminder_msg + reply if reminder_msg else reply})
-
-    elif user_input.lower() == 'play next':
+    elif user_input == 'play next':
         if playlist:
             song = playlist.pop(0)
             meta = get_youtube_metadata(song)
@@ -631,7 +731,7 @@ def ask():
             reply = 'Queue empty.'
         return jsonify({'reply': reminder_msg + reply if reminder_msg else reply})
 
-    # 6. Emotion detection
+    # 10. Emotion + General AI
     emotion = detect_emotion(user_input)
     emotion_prefix = ""
     if emotion == 'sad':
@@ -641,7 +741,6 @@ def ask():
     elif emotion == 'happy':
         emotion_prefix = "That's great! "
 
-    # 7. General AI
     ai_reply = ask_nvidia(user_input)
     final_reply = emotion_prefix + (reminder_msg + ai_reply if reminder_msg else ai_reply)
     return jsonify({'reply': final_reply})
