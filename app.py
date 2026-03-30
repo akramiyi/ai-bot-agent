@@ -5,117 +5,15 @@ import requests
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, render_template_string
 from openai import OpenAI
-# import yt_dlp moved to function for memory optimization
-
+import yt_dlp
 from dotenv import load_dotenv
-import firebase_admin
-from firebase_admin import credentials, db
+from dateparser import parse
 
 load_dotenv()
+
 app = Flask(__name__)
 
-# --- FIREBASE CLOUD MEMORY SETUP ---
-FB_URL = os.getenv("FIREBASE_DB_URL") or 'https://astra-ai-2cc5a-default-rtdb.asia-southeast1.firebasedatabase.app'
-try:
-    if not firebase_admin._apps:
-        if os.getenv("FIREBASE_CREDENTIALS"):
-            firebase_data = json.loads(os.getenv("FIREBASE_CREDENTIALS"))
-            cred = credentials.Certificate(firebase_data)
-            firebase_admin.initialize_app(cred, {'databaseURL': FB_URL})
-        elif os.path.exists("firebase.json"):
-            cred = credentials.Certificate("firebase.json")
-            firebase_admin.initialize_app(cred, {'databaseURL': FB_URL})
-except Exception as e:
-    print(f"Firebase Init Error: {e}")
-
-MEMORY_FILE = 'memory.json'
-
-# ---------- Memory Functions ----------
-def load_memory():
-    """Load memory from JSON file, return dict."""
-    if os.path.exists(MEMORY_FILE):
-        try:
-            with open(MEMORY_FILE, 'r') as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
-
-def save_memory(memory):
-    """Save memory dict to JSON file."""
-    with open(MEMORY_FILE, 'w') as f:
-        json.dump(memory, f, indent=2)
-
-def update_memory_from_text(text, memory):
-    """Extract facts from user message and update memory."""
-    text_lower = text.lower()
-    # Example rules
-    if 'meri sister' in text_lower or 'meri bahan' in text_lower:
-        parts = text.split()
-        for i, word in enumerate(parts):
-            if word.lower() in ['hai', 'hain'] and i+1 < len(parts):
-                name = " ".join(parts[i+1:]).strip(' .!,?')
-                memory['sister'] = name
-                return f"✅ Yaad rakha ki aapki sister {name} hain."
-    
-    if 'mera jija' in text_lower or 'mera brother in law' in text_lower:
-        parts = text.split()
-        for i, word in enumerate(parts):
-            if word.lower() in ['hai', 'hain'] and i+1 < len(parts):
-                name = " ".join(parts[i+1:]).strip(' .!,?')
-                memory['jija'] = name
-                return f"✅ Yaad rakha ki aapke jija {name} hain."
-    
-    if 'my name is' in text_lower or 'mera naam' in text_lower:
-        parts = text.split()
-        for i, word in enumerate(parts):
-            if word.lower() in ['is', 'hai'] and i+1 < len(parts):
-                name = " ".join(parts[i+1:]).strip(' .!,?')
-                memory['user_name'] = name
-                return f"✅ Yaad rakha ki aapka naam {name} hai."
-    
-    # Generic "yaad rakho" command
-    if text_lower.startswith('yaad rakho '):
-        fact = text[11:].strip()
-        if '=' in fact:
-            key, val = fact.split('=', 1)
-            memory[key.strip()] = val.strip()
-        else:
-            memory['last_fact'] = fact
-        return f"✅ Maine yaad rakh liya: {fact}"
-    return None
-
-def build_system_prompt(memory):
-    """Create system prompt including all stored facts and personal profile."""
-    prompt = """
-You are Astra, an advanced AI assistant created for Akram.
-Reply short, smart, and helpful. Maximum 2 lines.
-
-User Profile:
-- Name: Akram Ansari | Role: Aspiring Software Engineer 
-- Location: Chhapra, Bihar, India
-- Phone: +91 6204110766 | Email: meakramiyi@gmail.com
-- LinkedIn: linkedin.com/in/akram-alii
-- Education: B.Tech in CS (2024–2028), Brainware University
-
-Family & Friends:
-- Father: Ajmat Ali | Mother: Maimun Nisha
-- Siblings: Raushan Khatoon (Sister), Ekram Ali (Brother)
-- Friends: Rosidul Islam (Best Friend), Munshi Insiyat (Karate), Arjit Ghost (Rich), Aryan Raj (Editor), Kaif Ali, Nayan, Shahid, Wasim, Kunaal, Asif.
-
-Always remember you are talking to Akram. Use Hindi-English mix (Hinglish). 
-When the user says hello or greets you, always greet back with: 'Asalamlekuim Akram! How can I help you today?'
-"""
-    if memory:
-        prompt += "\nUser Memory/Facts:\n"
-        if isinstance(memory, dict):
-            for key, value in memory.items():
-                prompt += f"- {key}: {value}\n"
-        else:
-            prompt += f"- {memory}\n"
-    return prompt
-
-# ---------- NVIDIA AI ----------
+# ---------- NVIDIA AI Client ----------
 client = OpenAI(
     base_url="https://integrate.api.nvidia.com/v1",
     api_key=os.getenv("NVIDIA_API_KEY")
@@ -123,14 +21,10 @@ client = OpenAI(
 
 def ask_nvidia(prompt, system_message=None):
     if not system_message:
-        system_message = (
-            "You are Astra, a helpful AI assistant for Akram from Chhapra, Bihar. "
-            "When the user says hello, greet with 'Asalamlekuim Akram! How can I help you today?' "
-            "Respond in Hinglish."
-        )
+        system_message = "You are Astra, a helpful AI assistant for Akram from Chhapra, Bihar. Respond in Hinglish."
     try:
         response = client.chat.completions.create(
-            model="minimaxai/minimax-m2.5",
+            model="meta/llama-4-maverick-17b-128e-instruct",
             messages=[
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": prompt}
@@ -142,9 +36,136 @@ def ask_nvidia(prompt, system_message=None):
     except Exception as e:
         return f"AI error: {str(e)}"
 
-# ---------- YouTube Pro ----------
+# ---------- Image Generation ----------
+def generate_image(prompt):
+    """Generate an image using NVIDIA's free flux-schnell model."""
+    try:
+        response = client.images.generate(
+            model="black-forest-labs/flux-schnell",
+            prompt=prompt,
+            n=1,
+            size="512x512"
+        )
+        return response.data[0].url
+    except Exception as e:
+        return None
+
+# ---------- Emotion Detection ----------
+def detect_emotion(text):
+    """Return 'happy', 'sad', 'angry', or 'neutral' based on simple keywords."""
+    text_lower = text.lower()
+    if any(w in text_lower for w in ['sad', 'depressed', 'unhappy', 'upset']):
+        return 'sad'
+    if any(w in text_lower for w in ['angry', 'frustrated', 'annoyed']):
+        return 'angry'
+    if any(w in text_lower for w in ['happy', 'joy', 'excited', 'great']):
+        return 'happy'
+    return 'neutral'
+
+# ---------- Morning Briefing ----------
+def morning_briefing():
+    """Return a morning greeting with weather, reminders, quote, and song suggestion."""
+    weather = get_weather("Chhapra") if os.getenv('WEATHER_API_KEY') else "Weather not available."
+    due = check_reminders()
+    reminder_text = ""
+    if due:
+        reminder_text = "🔔 Reminders:\n" + "\n".join([f"- {r['message']} (at {r['time'].strftime('%I:%M %p')})" for r in due])
+    else:
+        reminder_text = "No reminders for today."
+    quote = get_motivational_quote()
+    song_suggestion = "How about listening to 'Jawan'? 🎵"
+    return f"🌞 Good morning, Akram!\n\n{weather}\n\n{reminder_text}\n\n💡 {quote}\n\n🎵 {song_suggestion}"
+
+def get_motivational_quote():
+    quotes = [
+        "The only way to do great work is to love what you do. – Steve Jobs",
+        "Believe you can and you're halfway there. – Theodore Roosevelt",
+        "Start where you are. Use what you have. Do what you can. – Arthur Ashe"
+    ]
+    import random
+    return random.choice(quotes)
+
+# ---------- Weather ----------
+def get_weather(city):
+    api_key = os.getenv('WEATHER_API_KEY')
+    if not api_key:
+        return "Weather API key missing."
+    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
+    try:
+        resp = requests.get(url)
+        data = resp.json()
+        if data.get('cod') != 200:
+            return f"City '{city}' not found."
+        temp = data['main']['temp']
+        desc = data['weather'][0]['description']
+        return f"Weather in {city.title()}: {temp}°C, {desc}."
+    except:
+        return "Weather service error."
+
+# ---------- Reminders ----------
+reminders = []
+
+def add_reminder(time_str, message):
+    parsed = parse(time_str, settings={'PREFER_DATES_FROM': 'future'})
+    if not parsed:
+        return False, "Sorry, I couldn't understand the time."
+    reminders.append({'time': parsed, 'message': message})
+    return True, f"Reminder set for {parsed.strftime('%I:%M %p on %b %d')}: {message}"
+
+def check_reminders():
+    now = datetime.now()
+    due = [r for r in reminders if r['time'] <= now]
+    reminders[:] = [r for r in reminders if r['time'] > now]
+    return due
+
+# ---------- Knowledge Graph ----------
+GRAPH_FILE = 'graph.json'
+def load_graph():
+    if os.path.exists(GRAPH_FILE):
+        with open(GRAPH_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_graph(graph):
+    with open(GRAPH_FILE, 'w') as f:
+        json.dump(graph, f, indent=2)
+
+def update_graph(user_input, graph):
+    """Extract simple relationships like 'X is Y' or 'X's Y is Z'."""
+    text = user_input.lower()
+    if 'meri sister' in text or 'meri bahan' in text:
+        parts = text.split()
+        for i, word in enumerate(parts):
+            if word in ['hai', 'hain'] and i+1 < len(parts):
+                name = parts[i+1].strip(' .!,?')
+                graph['Akram'] = graph.get('Akram', {})
+                graph['Akram']['sister'] = name
+                return f"✅ Yaad rakha: Akram ki sister {name} hain."
+    if 'mera jija' in text or 'mera brother in law' in text:
+        parts = text.split()
+        for i, word in enumerate(parts):
+            if word in ['hai', 'hain'] and i+1 < len(parts):
+                name = parts[i+1].strip(' .!,?')
+                graph['Akram'] = graph.get('Akram', {})
+                graph['Akram']['jija'] = name
+                return f"✅ Yaad rakha: Akram ke jija {name} hain."
+    return None
+
+def query_graph(query, graph):
+    """Answer based on stored relationships."""
+    q = query.lower()
+    if 'sister' in q:
+        sister = graph.get('Akram', {}).get('sister')
+        if sister:
+            return f"Aapki sister {sister} hain."
+    if 'jija' in q or 'brother in law' in q:
+        jija = graph.get('Akram', {}).get('jija')
+        if jija:
+            return f"Aapke jija {jija} hain."
+    return None
+
+# ---------- YouTube ----------
 def get_youtube_metadata(song_name):
-    import yt_dlp
     try:
         with yt_dlp.YoutubeDL({'quiet': True, 'extract_flat': True}) as ydl:
             info = ydl.extract_info(f"ytsearch1:{song_name}", download=False)
@@ -159,50 +180,42 @@ def get_youtube_metadata(song_name):
         return None
 
 playlist = []
-MAX_HISTORY = 20
-conversation_history = []
 
-# --- Reminder System ---
-reminders = []
+# ---------- Dynamic UI Themes ----------
+THEME_FILE = 'theme.json'
+def load_theme():
+    if os.path.exists(THEME_FILE):
+        with open(THEME_FILE, 'r') as f:
+            return json.load(f)
+    return {'primary': '#e6b91e', 'secondary': '#ffaa33', 'bg_gradient': 'radial-gradient(circle at 20% 30%, #0a0f1a, #03060c)'}
 
-def add_reminder(time_str, message):
-    """Parse time string and add reminder."""
-    from dateparser import parse
-    parsed_time = parse(time_str, settings={'PREFER_DATES_FROM': 'future'})
-    if not parsed_time:
-        return False, "Sorry, I couldn't understand the time. Please use format like '5 PM' or 'tomorrow 8 AM'."
-    reminders.append({'time': parsed_time, 'message': message})
-    return True, f"⏰ Reminder set for {parsed_time.strftime('%I:%M %p on %b %d')}: {message}"
+def save_theme(theme):
+    with open(THEME_FILE, 'w') as f:
+        json.dump(theme, f, indent=2)
 
-def check_reminders():
-    """Return list of due reminders and remove them."""
-    now = datetime.now()
-    due = [r for r in reminders if r['time'] <= now]
-    reminders[:] = [r for r in reminders if r['time'] > now]
-    return due
+def apply_theme(theme_name):
+    themes = {
+        'cyberpunk': {
+            'primary': '#00ff9d',
+            'secondary': '#ff00e5',
+            'bg_gradient': 'radial-gradient(circle at 30% 40%, #0d0b1a, #000000)'
+        },
+        'sunset': {
+            'primary': '#ff6b6b',
+            'secondary': '#ff8e53',
+            'bg_gradient': 'radial-gradient(circle at 70% 20%, #1e3c72, #2a5298)'
+        },
+        'default': {
+            'primary': '#e6b91e',
+            'secondary': '#ffaa33',
+            'bg_gradient': 'radial-gradient(circle at 20% 30%, #0a0f1a, #03060c)'
+        }
+    }
+    theme = themes.get(theme_name, themes['default'])
+    save_theme(theme)
+    return theme
 
-# --- Weather ---
-def get_weather(city):
-    """Fetch weather from OpenWeatherMap."""
-    api_key = os.getenv('WEATHER_API_KEY')
-    if not api_key:
-        return "Weather API key missing. Please set WEATHER_API_KEY in environment."
-    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
-    try:
-        resp = requests.get(url, timeout=5)
-        data = resp.json()
-        if data.get('cod') != 200:
-            return f"City '{city}' not found. Please check spelling."
-        temp = data['main']['temp']
-        feels = data['main']['feels_like']
-        desc = data['weather'][0]['description']
-        humidity = data['main']['humidity']
-        return f"🌤 Weather in {city.title()}: {temp}°C (feels {feels}°C), {desc}, humidity {humidity}%."
-    except Exception as e:
-        return f"Weather error: {e}"
-
-
-# ---------- Web UI ----------
+# ---------- Frontend HTML ----------
 HTML = """
 <!DOCTYPE html>
 <html lang="en">
@@ -212,15 +225,19 @@ HTML = """
     <title>Astra | Cinematic HUD</title>
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;800&family=Poppins:wght@300;400;500;600&display=swap" rel="stylesheet">
     <style>
+        :root {
+            --primary: #e6b91e;
+            --secondary: #ffaa33;
+            --bg-gradient: radial-gradient(circle at 20% 30%, #0a0f1a, #03060c);
+        }
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
         }
-
         body {
             min-height: 100vh;
-            background: radial-gradient(circle at 20% 30%, #0a0f1a, #03060c);
+            background: var(--bg-gradient);
             font-family: 'Poppins', sans-serif;
             display: flex;
             align-items: center;
@@ -229,8 +246,6 @@ HTML = """
             position: relative;
             overflow-x: hidden;
         }
-
-        /* Animated stars background */
         .stars {
             position: fixed;
             top: 0;
@@ -251,21 +266,16 @@ HTML = """
             0% { opacity: 0; transform: scale(0.5); }
             100% { opacity: 0.8; transform: scale(1); }
         }
-
-        /* Main container */
         .container {
             width: 100%;
             max-width: 900px;
             background: rgba(15, 20, 30, 0.5);
             backdrop-filter: blur(12px);
             border-radius: 32px;
-            border: 1px solid rgba(230, 185, 30, 0.3);
+            border: 1px solid var(--primary);
             box-shadow: 0 25px 45px rgba(0,0,0,0.3), 0 0 20px rgba(230,185,30,0.2);
             z-index: 2;
-            transition: all 0.3s ease;
         }
-
-        /* Header */
         .header {
             padding: 20px 30px;
             border-bottom: 1px solid rgba(230,185,30,0.2);
@@ -275,12 +285,10 @@ HTML = """
             font-family: 'Orbitron', monospace;
             font-size: 1.8rem;
             font-weight: 700;
-            background: linear-gradient(135deg, #e6b91e, #ffaa33);
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
             -webkit-background-clip: text;
             background-clip: text;
             color: transparent;
-            letter-spacing: 2px;
-            text-shadow: 0 0 5px rgba(230,185,30,0.3);
         }
         .badge {
             display: inline-block;
@@ -289,13 +297,9 @@ HTML = """
             padding: 4px 12px;
             border-radius: 20px;
             font-size: 0.7rem;
-            font-weight: 500;
-            color: #e6b91e;
+            color: var(--primary);
             font-family: 'Orbitron', monospace;
-            backdrop-filter: blur(4px);
         }
-
-        /* Chat area */
         .chat {
             height: 450px;
             overflow-y: auto;
@@ -305,7 +309,6 @@ HTML = """
             gap: 12px;
             scroll-behavior: smooth;
         }
-        /* Custom scrollbar */
         .chat::-webkit-scrollbar {
             width: 5px;
         }
@@ -314,11 +317,9 @@ HTML = """
             border-radius: 10px;
         }
         .chat::-webkit-scrollbar-thumb {
-            background: #e6b91e;
+            background: var(--primary);
             border-radius: 10px;
         }
-
-        /* Message bubbles */
         .msg {
             max-width: 80%;
             padding: 12px 18px;
@@ -329,18 +330,12 @@ HTML = """
             animation: fadeInUp 0.3s ease-out;
         }
         @keyframes fadeInUp {
-            from {
-                opacity: 0;
-                transform: translateY(10px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
         }
         .user {
             align-self: flex-end;
-            background: linear-gradient(135deg, #e6b91e, #ffaa33);
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
             color: #0a0f1a;
             border-bottom-right-radius: 4px;
             box-shadow: 0 2px 8px rgba(230,185,30,0.3);
@@ -353,8 +348,6 @@ HTML = """
             color: #e0e0e0;
             border-bottom-left-radius: 4px;
         }
-
-        /* Typing indicator */
         .typing {
             display: flex;
             gap: 6px;
@@ -363,12 +356,11 @@ HTML = """
             background: rgba(30, 35, 50, 0.6);
             border-radius: 20px;
             width: fit-content;
-            backdrop-filter: blur(4px);
         }
         .typing span {
             width: 8px;
             height: 8px;
-            background: #e6b91e;
+            background: var(--primary);
             border-radius: 50%;
             animation: bounce 1.2s infinite;
         }
@@ -378,8 +370,6 @@ HTML = """
             0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
             30% { transform: translateY(-8px); opacity: 1; }
         }
-
-        /* Input area */
         .input-area {
             padding: 20px;
             border-top: 1px solid rgba(230,185,30,0.2);
@@ -399,12 +389,11 @@ HTML = """
             transition: all 0.3s;
         }
         .input-area input:focus {
-            border-color: #e6b91e;
+            border-color: var(--primary);
             box-shadow: 0 0 12px rgba(230,185,30,0.4);
-            background: rgba(10, 15, 26, 0.8);
         }
         .input-area button {
-            background: linear-gradient(135deg, #e6b91e, #ffaa33);
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
             border: none;
             border-radius: 40px;
             padding: 0 24px;
@@ -414,30 +403,34 @@ HTML = """
             color: #0a0f1a;
             cursor: pointer;
             transition: all 0.2s;
-            box-shadow: 0 2px 8px rgba(230,185,30,0.3);
         }
         .input-area button:hover {
             transform: scale(1.02);
             box-shadow: 0 4px 12px rgba(230,185,30,0.5);
         }
-
-        /* Responsive */
         @media (max-width: 600px) {
-            .container {
-                border-radius: 24px;
-            }
-            .msg {
-                max-width: 90%;
-                font-size: 0.85rem;
-            }
-            .header h1 {
-                font-size: 1.4rem;
-            }
-            .input-area input, .input-area button {
-                padding: 12px 16px;
-            }
+            .msg { max-width: 90%; font-size: 0.85rem; }
+            .header h1 { font-size: 1.4rem; }
+            .input-area input, .input-area button { padding: 12px 16px; }
         }
     </style>
+    <script>
+        window.addEventListener('load', () => {
+            const starsContainer = document.getElementById('stars');
+            for (let i = 0; i < 150; i++) {
+                const star = document.createElement('div');
+                star.classList.add('star');
+                const size = Math.random() * 3 + 1;
+                star.style.width = size + 'px';
+                star.style.height = size + 'px';
+                star.style.left = Math.random() * 100 + '%';
+                star.style.top = Math.random() * 100 + '%';
+                star.style.animationDelay = Math.random() * 5 + 's';
+                star.style.animationDuration = Math.random() * 3 + 2 + 's';
+                starsContainer.appendChild(star);
+            }
+        });
+    </script>
 </head>
 <body>
     <div class="stars" id="stars"></div>
@@ -449,27 +442,12 @@ HTML = """
         <div class="chat" id="chat"></div>
         <div class="input-area">
             <input type="text" id="input" placeholder="Ask Astra..." autocomplete="off">
+            <button onclick="startVoice()">🎤</button>
             <button onclick="send()">SEND</button>
-            <button onclick="startVoice()" id="micBtn" title="Voice Input">🎤</button>
         </div>
     </div>
 
     <script>
-        // Generate stars background
-        const starsContainer = document.getElementById('stars');
-        for (let i = 0; i < 150; i++) {
-            const star = document.createElement('div');
-            star.classList.add('star');
-            const size = Math.random() * 3 + 1;
-            star.style.width = size + 'px';
-            star.style.height = size + 'px';
-            star.style.left = Math.random() * 100 + '%';
-            star.style.top = Math.random() * 100 + '%';
-            star.style.animationDelay = Math.random() * 5 + 's';
-            star.style.animationDuration = Math.random() * 3 + 2 + 's';
-            starsContainer.appendChild(star);
-        }
-
         const chat = document.getElementById('chat');
         const input = document.getElementById('input');
 
@@ -486,53 +464,38 @@ HTML = """
             return div;
         }
 
-        // Add initial greeting message from Astra
         window.addEventListener('load', () => {
             addMessage('bot', '🖖 Asalamlekuim Akram! How can I help you today? 😊');
         });
 
+        let typingDiv = null;
         async function send() {
             const text = input.value.trim();
             if (!text) return;
             addMessage('user', text);
             input.value = '';
-            
-            let retries = 1;
-            let success = false;
-            let reply = null;
-            
-            while (retries >= 0 && !success) {
-                const typingDiv = addMessage('bot', '', true);
-                try {
-                    const res = await fetch('/ask', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({message: text})
-                    });
-                    const data = await res.json();
-                    reply = data.reply || 'No response.';
-                    success = true;
-                    typingDiv.remove();
-                    addMessage('bot', reply);
-                } catch (err) {
-                    typingDiv.remove();
-                    if (retries > 0) {
-                        // Show retrying message
-                        addMessage('bot', '⏳ Retrying...');
-                        retries--;
-                        await new Promise(r => setTimeout(r, 2000)); // wait 2 sec
-                    } else {
-                        addMessage('bot', 'Network error. Please try again.');
-                    }
+            typingDiv = addMessage('bot', '', true);
+            try {
+                const res = await fetch('/ask', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({message: text})
+                });
+                const data = await res.json();
+                const reply = data.reply || 'No response.';
+                if (typingDiv) typingDiv.remove();
+                addMessage('bot', reply);
+                if (data.theme) {
+                    document.documentElement.style.setProperty('--primary', data.theme.primary);
+                    document.documentElement.style.setProperty('--secondary', data.theme.secondary);
+                    document.documentElement.style.setProperty('--bg-gradient', data.theme.bg_gradient);
                 }
+            } catch (err) {
+                if (typingDiv) typingDiv.remove();
+                addMessage('bot', 'Network error. Please try again.');
             }
         }
 
-        input.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') send();
-        });
-
-        // Voice Input
         let recognition = null;
         function startVoice() {
             if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
@@ -543,28 +506,18 @@ HTML = """
             recognition = new SpeechRecognition();
             recognition.lang = 'hi-IN';
             recognition.interimResults = false;
-            const micBtn = document.getElementById('micBtn');
-            micBtn.style.background = '#ff4444';
-            micBtn.textContent = '🔴';
             recognition.onresult = (event) => {
                 const text = event.results[0][0].transcript;
                 input.value = text;
-                micBtn.style.background = '';
-                micBtn.textContent = '🎤';
                 send();
             };
-            recognition.onerror = (event) => {
-                console.error(event);
-                micBtn.style.background = '';
-                micBtn.textContent = '🎤';
-                addMessage('bot', 'Voice recognition error. Please try again.');
-            };
-            recognition.onend = () => {
-                micBtn.style.background = '';
-                micBtn.textContent = '🎤';
-            };
+            recognition.onerror = () => addMessage('bot', 'Voice recognition error.');
             recognition.start();
         }
+
+        input.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') send();
+        });
     </script>
 </body>
 </html>
@@ -572,37 +525,50 @@ HTML = """
 
 @app.route('/')
 def index():
-    return render_template_string(HTML)
+    theme = load_theme()
+    return render_template_string(HTML, theme=theme)
 
 @app.route('/ask', methods=['POST'])
 def ask():
-    global conversation_history
     data = request.get_json()
-    user_input_raw = data.get('message', '').strip()
-    user_input = user_input_raw.lower()
+    user_input = data.get('message', '').strip()
     if not user_input:
         return jsonify({'reply': 'Kuch boliye.'})
 
-    # Check for due reminders on every request
+    # 1. Theme change command
+    if user_input.lower().startswith('set theme '):
+        theme_name = user_input.lower().replace('set theme ', '').strip()
+        theme = apply_theme(theme_name)
+        return jsonify({'reply': f"Theme changed to {theme_name}.", 'theme': theme})
+
+    # 2. Morning briefing
+    if user_input.lower() in ['good morning', 'morning', 'subah']:
+        reply = morning_briefing()
+        return jsonify({'reply': reply})
+
+    # 3. Knowledge Graph: Update or query
+    graph = load_graph()
+    update_msg = update_graph(user_input, graph)
+    if update_msg:
+        save_graph(graph)
+        return jsonify({'reply': update_msg})
+    graph_answer = query_graph(user_input, graph)
+    if graph_answer:
+        return jsonify({'reply': graph_answer})
+
+    # 4. Check for due reminders
     due = check_reminders()
     reminder_msg = ""
     if due:
         reminder_msg = "🔔 <b>Reminders:</b><br>" + "<br>".join([f"- {r['message']} (at {r['time'].strftime('%I:%M %p')})" for r in due]) + "<br><br>"
 
-    # Memory handling (Cloud First)
-    try:
-        memory = db.reference("memory").get() or {}
-    except:
-        memory = load_memory() # Fallback to local JSON
-
-    # --- Weather Command ---
-    if user_input.startswith('weather in ') or user_input.startswith('weather '):
-        city = user_input.replace('weather in ', '').replace('weather ', '').strip()
+    # 5. Special commands
+    if user_input.lower().startswith('weather in ') or user_input.lower().startswith('weather '):
+        city = user_input.lower().replace('weather in ', '').replace('weather ', '').strip()
         reply = get_weather(city)
         return jsonify({'reply': reminder_msg + reply if reminder_msg else reply})
 
-    # --- Reminder Command ---
-    if user_input.startswith('remind me '):
+    elif user_input.lower().startswith('remind me '):
         text = user_input[10:].strip()
         match = re.search(r'(?:at|on)?\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm))', text, re.IGNORECASE)
         if match:
@@ -613,31 +579,26 @@ def ask():
             if not message:
                 message = "reminder"
             success, result = add_reminder(time_str, message)
-            reply = result
+            reply = result if success else f"Error: {result}"
         else:
-            reply = "I couldn't understand the time. Please use format like 'remind me at 5 PM to call mom'."
+            reply = "Please use format like 'remind me at 5 PM to call mom'."
         return jsonify({'reply': reminder_msg + reply if reminder_msg else reply})
 
-    # Special command: kya yaad hai
-    if user_input == 'kya yaad hai':
-        if not memory:
-            return jsonify({'reply': reminder_msg + "Meri memory abhi khali hai. Aap kuch batao, main yaad rakhunga."})
+    elif user_input.lower().startswith('draw ') or user_input.lower().startswith('generate '):
+        prompt = user_input.lower().replace('draw ', '').replace('generate ', '').strip()
+        if not prompt:
+            reply = "What should I draw?"
         else:
-            if isinstance(memory, dict):
-                reply = "Mujhe yeh yaad hai:<br>" + "<br>".join([f"- {k}: {v}" for k,v in memory.items()])
+            img_url = generate_image(prompt)
+            if img_url:
+                reply = f"Here's an image for '{prompt}':<br><img src='{img_url}' style='max-width:100%; border-radius:12px;'>"
             else:
-                reply = f"Mujhe yeh yaad hai: {memory}"
-            return jsonify({'reply': reminder_msg + reply if reminder_msg else reply})
-
-    # Check if user wants to teach something
-    update_msg = update_memory_from_text(user_input_raw, memory)
-    if update_msg:
-        save_memory(memory)
-        return jsonify({'reply': reminder_msg + update_msg if reminder_msg else update_msg})
+                reply = "Sorry, I couldn't generate that image. Please try again."
+        return jsonify({'reply': reminder_msg + reply if reminder_msg else reply})
 
     # YouTube commands
-    if user_input.startswith('play song ') or user_input.startswith('play '):
-        song = re.sub(r'^(play song |play )', '', user_input).strip()
+    if user_input.lower().startswith('play song ') or user_input.lower().startswith('play '):
+        song = re.sub(r'^(play song |play )', '', user_input.lower()).strip()
         if not song:
             return jsonify({'reply': 'Which song?'})
         meta = get_youtube_metadata(song)
@@ -645,19 +606,22 @@ def ask():
             reply = f'🎵 <b>{meta["title"]}</b><br><img src="{meta["thumbnail"]}" width="200"><br><a href="{meta["url"]}" target="_blank" style="background:#ff0000;color:white;padding:8px 16px;text-decoration:none;border-radius:8px;">▶ Play on YouTube</a>'
         else:
             reply = f'<a href="https://www.youtube.com/results?search_query={song.replace(" ", "+")}" target="_blank">🔍 Search YouTube for "{song}"</a>'
-        return jsonify({'reply': reply})
+        return jsonify({'reply': reminder_msg + reply if reminder_msg else reply})
 
-    elif user_input.startswith('add to queue '):
-        song = user_input.replace('add to queue ', '').strip()
+    elif user_input.lower().startswith('add to queue '):
+        song = user_input.lower().replace('add to queue ', '').strip()
         playlist.append(song)
-        return jsonify({'reply': f'✅ Added "{song}". {len(playlist)} in queue.'})
+        reply = f'✅ Added "{song}". {len(playlist)} in queue.'
+        return jsonify({'reply': reminder_msg + reply if reminder_msg else reply})
 
-    elif user_input == 'show queue':
+    elif user_input.lower() == 'show queue':
         if not playlist:
-            return jsonify({'reply': 'Queue empty.'})
-        return jsonify({'reply': '📋 Queue:<br>' + '<br>'.join(f'{i+1}. {s}' for i,s in enumerate(playlist))})
+            reply = 'Queue empty.'
+        else:
+            reply = '📋 Queue:<br>' + '<br>'.join(f'{i+1}. {s}' for i,s in enumerate(playlist))
+        return jsonify({'reply': reminder_msg + reply if reminder_msg else reply})
 
-    elif user_input == 'play next':
+    elif user_input.lower() == 'play next':
         if playlist:
             song = playlist.pop(0)
             meta = get_youtube_metadata(song)
@@ -667,40 +631,21 @@ def ask():
                 reply = f'Now playing: {song} (link not available)'
         else:
             reply = 'Queue empty.'
-        return jsonify({'reply': reply})
+        return jsonify({'reply': reminder_msg + reply if reminder_msg else reply})
 
-    # Build system prompt with memory
-    system_prompt = build_system_prompt(memory)
-    
-    cloud_memory = memory
-    
-    # Format global history for context
-    history_str = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in conversation_history])
-    
-    full_user_prompt = f"""
-Chat History:
-{history_str}
+    # 6. Emotion detection
+    emotion = detect_emotion(user_input)
+    emotion_prefix = ""
+    if emotion == 'sad':
+        emotion_prefix = "I'm here for you. "
+    elif emotion == 'angry':
+        emotion_prefix = "Let's calm down. "
+    elif emotion == 'happy':
+        emotion_prefix = "That's great! "
 
-User Memory (Facts):
-{cloud_memory}
-
-User Question:
-{user_input_raw}
-"""
-    # General AI
-    ai_reply = ask_nvidia(full_user_prompt, system_prompt)
-    
-    # Prepend due reminders to AI reply
-    final_reply = (reminder_msg + ai_reply) if reminder_msg else ai_reply
-    
-    # Add to rolling history
-    conversation_history.append({"role": "user", "content": user_input_raw})
-    conversation_history.append({"role": "assistant", "content": ai_reply})
-    
-    # Trim history
-    if len(conversation_history) > MAX_HISTORY:
-        conversation_history = conversation_history[-MAX_HISTORY:]
-        
+    # 7. General AI
+    ai_reply = ask_nvidia(user_input)
+    final_reply = emotion_prefix + (reminder_msg + ai_reply if reminder_msg else ai_reply)
     return jsonify({'reply': final_reply})
 
 if __name__ == '__main__':
