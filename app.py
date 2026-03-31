@@ -58,15 +58,12 @@ def smart_search(query):
             results = list(ddgs.text(query, max_results=3))
             if not results:
                 return "No results found."
-            # Prepare a summary prompt
             context = "\n".join([f"- {r['title']}: {r['body']}" for r in results])
             prompt = f"Summarize the following search results about '{query}' in 2-3 sentences in Hinglish:\n{context}"
             summary = ask_nvidia(prompt, system_message="You are a helpful summarizer.")
-            # Provide links
             links = "\n".join([f"🔗 {r['title']}: {r['href']}" for r in results])
             return f"{summary}\n\nSource links:\n{links}"
     except Exception as e:
-        # Fallback to simple DuckDuckGo API
         return web_search_simple(query)
 
 def web_search_simple(query):
@@ -168,7 +165,6 @@ def reminder_monitor():
                 due = check_reminders(user)
                 for r in due:
                     reminder_notifications.append((user, r["message"]))
-        # also check default profile if not already covered
         default_file = get_profile_file("akram")
         if not os.path.exists(default_file):
             due = check_reminders("akram")
@@ -236,7 +232,7 @@ def get_youtube_metadata(song_name):
     except:
         return None
 
-playlist = []  # global queue (not per-user)
+playlist = []  # global queue
 
 # ---------- Weather ----------
 def get_weather(city):
@@ -315,61 +311,12 @@ def set_theme(user, theme_name):
     save_profile(user, profile)
     return load_theme(user)
 
-# ---------- Telegram Bot ----------
-telegram_bot = None
-telegram_user_map = {}  # chat_id -> profile name
-
-def init_telegram():
-    global telegram_bot
-    if not TELEGRAM_TOKEN:
-        return
-    try:
-        telegram_bot = Bot(token=TELEGRAM_TOKEN)
-        # Load mapping from file
-        mapping_file = os.path.join(PROFILES_DIR, 'telegram_map.json')
-        if os.path.exists(mapping_file):
-            with open(mapping_file, 'r') as f:
-                telegram_user_map.update(json.load(f))
-    except Exception as e:
-        print(f"Telegram init error: {e}")
-
-def save_telegram_map():
-    mapping_file = os.path.join(PROFILES_DIR, 'telegram_map.json')
-    with open(mapping_file, 'w') as f:
-        json.dump(telegram_user_map, f)
-
-@app.route('/telegram', methods=['GET', 'POST'])
-def telegram_webhook():
-    if request.method == 'GET':
-        return "🤖 Astra Telegram Webhook is ACTIVE and waiting for POST requests.", 200
-    
-    if not TELEGRAM_TOKEN or not telegram_bot:
-        return "Telegram bot not configured", 500
-    try:
-        data = request.get_json()
-        update = Update.de_json(data, telegram_bot)
-        if update.message and update.message.text:
-            chat_id = update.message.chat_id
-            user_text = update.message.text.strip()
-            # Get profile for this chat
-            profile_name = telegram_user_map.get(str(chat_id), "akram")
-            # Process using the same logic as web
-            reply = process_command(user_text, profile_name, from_telegram=True)
-            # Remove HTML tags for Telegram if needed, or use parse_mode='HTML'
-            clean_reply = reply.replace('<br>', '\n').replace('<b>', '<b>').replace('</b>', '</b>')
-            clean_reply = re.sub(r'<(?!(?:b|i|a|code|pre|/b|/i|/a|/code|/pre)\b)[^>]+>', '', clean_reply)
-            telegram_bot.send_message(chat_id=chat_id, text=clean_reply, parse_mode='HTML')
-        return "OK", 200
-    except Exception as e:
-        return f"Error: {e}", 500
-
-# ---------- Core Command Processing (shared between web and Telegram) ----------
+# ---------- Core Command Processing (shared) ----------
 def process_command(user_input, user="akram", from_telegram=False):
-    """Process user command and return reply string."""
     if not user_input.strip():
         return "Kuch boliye."
 
-    # --- Check for due reminders ---
+    # Proactive reminders
     global reminder_notifications
     pending = [msg for (u, msg) in reminder_notifications if u == user]
     reminder_notifications = [(u, msg) for (u, msg) in reminder_notifications if u != user]
@@ -377,31 +324,28 @@ def process_command(user_input, user="akram", from_telegram=False):
     if pending:
         reminder_msg = "🔔 **Proactive Reminder:**\n" + "\n".join(pending) + "\n\n"
 
-    # --- 1. Switch user ---
-    if user_input.startswith('switch user '):
+    # 1. Switch user
+    if not from_telegram and user_input.startswith('switch user '):
         new_user = user_input[12:].strip().lower()
-        if not from_telegram:
-            app.current_user = new_user
-        load_profile(new_user)  # ensure exists
         return f"Switched to profile: {new_user.capitalize()}"
 
-    # --- 2. Theme change ---
+    # 2. Theme change
     if user_input.startswith('set theme '):
         theme_name = user_input[10:].strip()
         set_theme(user, theme_name)
         return f"THEME_CHANGE:{theme_name}" if not from_telegram else f"Theme changed to {theme_name}."
 
-    # --- 3. Morning briefing ---
+    # 3. Morning briefing
     if user_input.lower() in ['good morning', 'morning', 'subah']:
         reply = morning_briefing(user)
         return reminder_msg + reply if reminder_msg else reply
 
-    # --- 4. News ---
+    # 4. News
     if 'news' in user_input.lower() or 'khabar' in user_input.lower():
         reply = get_news()
         return reminder_msg + reply if reminder_msg else reply
 
-    # --- 5. Smart search ---
+    # 5. Smart search
     if user_input.startswith('search '):
         query = user_input[7:].strip()
         if not query:
@@ -410,7 +354,7 @@ def process_command(user_input, user="akram", from_telegram=False):
             reply = smart_search(query)
         return reminder_msg + reply if reminder_msg else reply
 
-    # --- 6. Knowledge Graph ---
+    # 6. Knowledge Graph
     graph_update = update_graph(user, user_input)
     if graph_update:
         return reminder_msg + graph_update if reminder_msg else graph_update
@@ -418,7 +362,7 @@ def process_command(user_input, user="akram", from_telegram=False):
     if graph_answer:
         return reminder_msg + graph_answer if reminder_msg else graph_answer
 
-    # --- 7. Reminders ---
+    # 7. Reminders
     if user_input.startswith('remind me '):
         text = user_input[10:].strip()
         match = re.search(r'(?:at|on)?\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm))', text, re.IGNORECASE)
@@ -435,13 +379,13 @@ def process_command(user_input, user="akram", from_telegram=False):
             reply = "Please use format like 'remind me at 5 PM to call mom'."
         return reminder_msg + reply if reminder_msg else reply
 
-    # --- 8. Weather ---
+    # 8. Weather
     if user_input.startswith('weather in ') or user_input.startswith('weather '):
         city = user_input.replace('weather in ', '').replace('weather ', '').strip()
         reply = get_weather(city)
         return reminder_msg + reply if reminder_msg else reply
 
-    # --- 9. Image generation ---
+    # 9. Image generation
     if user_input.startswith('draw ') or user_input.startswith('generate '):
         prompt = user_input.replace('draw ', '').replace('generate ', '').strip()
         if not prompt:
@@ -451,7 +395,7 @@ def process_command(user_input, user="akram", from_telegram=False):
             reply = f"🎨 Here's an image for '{prompt}':<br><img src='{img_url}' style='max-width:100%; border-radius:12px;'>"
         return reminder_msg + reply if reminder_msg else reply
 
-    # --- 10. YouTube commands ---
+    # 10. YouTube commands
     if user_input.startswith('play song ') or user_input.startswith('play '):
         song = re.sub(r'^(play song |play )', '', user_input).strip()
         if not song:
@@ -463,7 +407,8 @@ def process_command(user_input, user="akram", from_telegram=False):
             reply = f'<a href="https://www.youtube.com/results?search_query={song.replace(" ", "+")}" target="_blank">🔍 Search YouTube for "{song}"</a>'
         return reminder_msg + reply if reminder_msg else reply
 
-    # --- 11. Queue (global) ---
+    # 11. Queue
+    global playlist
     if user_input.startswith('add to queue '):
         song = user_input.replace('add to queue ', '').strip()
         playlist.append(song)
@@ -487,7 +432,7 @@ def process_command(user_input, user="akram", from_telegram=False):
             reply = 'Queue empty.'
         return reminder_msg + reply if reminder_msg else reply
 
-    # --- 12. Emotion + General AI ---
+    # 12. Emotion + General AI
     emotion = detect_emotion(user_input)
     emotion_prefix = ""
     if emotion == 'sad':
@@ -706,7 +651,6 @@ HTML = """<!DOCTYPE html>
             return false;
         };
 
-        // Stars generation
         window.addEventListener('load', () => {
             const starsContainer = document.getElementById('stars');
             for (let i = 0; i < 150; i++) {
@@ -845,7 +789,7 @@ def ask():
     user = getattr(app, 'current_user', 'akram')
     reply = process_command(user_input, user, from_telegram=False)
     
-    # Handle theme change for web specifically
+    # Handle theme change (extra check for web response)
     if reply.startswith("THEME_CHANGE:"):
         theme_name = reply[13:]
         theme = load_theme(user)
@@ -853,8 +797,29 @@ def ask():
     
     return jsonify({'reply': reply})
 
-# ---------- Initialize Telegram ----------
-init_telegram()
+@app.route('/telegram', methods=['GET', 'POST'])
+def telegram_webhook():
+    if request.method == 'GET':
+        return "🤖 Astra Telegram Webhook is ACTIVE and waiting for POST requests.", 200
+
+    data = request.get_json()
+    if not data or 'message' not in data:
+        return "OK", 200
+
+    chat_id = data['message']['chat']['id']
+    user_text = data['message'].get('text', '').strip()
+    if not user_text:
+        return "OK", 200
+
+    reply = process_command(user_text, user="akram", from_telegram=True)
+
+    token = os.getenv('TELEGRAM_BOT_TOKEN')
+    if token:
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        # Format reply for Telegram (remove some HTML not supported, keep B/A)
+        clean_reply = reply.replace('<br>', '\n')
+        requests.post(url, json={'chat_id': chat_id, 'text': clean_reply, 'parse_mode': 'HTML'})
+    return "OK", 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
