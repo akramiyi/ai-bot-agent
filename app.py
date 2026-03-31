@@ -24,6 +24,8 @@ app.secret_key = os.getenv('SECRET_KEY', 'astra-secret-888-chhapra')
 
 # ---------- Interaction Tracking ----------
 telegram_greeted = {}  # chat_id -> bool
+last_train = {}        # user -> last_train_number
+train_cache = {}      # train_number -> search_result
 
 # ---------- Configuration ----------
 PROFILES_DIR = 'profiles'
@@ -40,27 +42,23 @@ client = OpenAI(
 
 def get_system_message(first_interaction=False):
     base = (
-        "You are Astra, a helpful AI assistant for Akram from Chhapra, Bihar. "
-        "Respond in Hinglish. "
-        "Be direct and concise. "
-        "Do NOT use placeholders like '[insert...]'. "
+        "You are Astra, a highly intelligent and helpful AI assistant for Akram from Chhapra, Bihar. "
+        "Respond in Hinglish (Hindi + English). "
+        "Be direct, concise, and smart. "
+        "Use the provided conversation history to understand the context of follow-up questions. "
+        "Do NOT use placeholders. "
         "If you don't know something, say 'Mujhe nahi pata' instead of guessing."
     )
     if first_interaction:
         return base + " In your very first reply, greet with 'Asalamlekuim Akram'. After that, NEVER use any greeting again."
     else:
-        return base + " Do NOT include any greeting like 'Asalamlekuim Akram' in your response. Give a direct, concise answer."
+        return base + " Do NOT include any greeting like 'Asalamlekuim Akram' in your response. Give a direct, concise answer based on context."
 
-def ask_nvidia(prompt, system_message=None):
-    if not system_message:
-        system_message = get_system_message(first_interaction=False)  # Default to no greeting
+def ask_nvidia(messages):
     try:
         response = client.chat.completions.create(
             model="meta/llama-4-maverick-17b-128e-instruct",
-            messages=[
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": prompt}
-            ],
+            messages=messages,
             temperature=0.7,
             max_tokens=500
         )
@@ -69,6 +67,15 @@ def ask_nvidia(prompt, system_message=None):
         return f"AI error: {str(e)}"
 
 # ---------- Web Search with Summarization ----------
+def get_train_details(train_number):
+    """Fetch train schedule and cache results."""
+    if train_number in train_cache:
+        return train_cache[train_number]
+    query = f"Indian Railways train {train_number} schedule route timings stations"
+    result = smart_search(query)
+    train_cache[train_number] = result
+    return result
+
 def smart_search(query):
     try:
         with DDGS() as ddgs:
@@ -77,7 +84,12 @@ def smart_search(query):
                 return "No results found."
             context = "\n".join([f"- {r['title']}: {r['body']}" for r in results])
             prompt = f"Summarize the following search results about '{query}' in 2-3 sentences in Hinglish:\n{context}"
-            summary = ask_nvidia(prompt, system_message="You are a helpful summarizer.")
+            # For summarization, we use a single turn call
+            messages = [
+                {"role": "system", "content": "You are a helpful summarizer."},
+                {"role": "user", "content": prompt}
+            ]
+            summary = ask_nvidia(messages)
             links = "\n".join([f"🔗 {r['title']}: {r['href']}" for r in results])
             return f"{summary}\n\nSource links:\n{links}"
     except Exception as e:
@@ -478,18 +490,52 @@ def process_command(user_input, user="akram", from_telegram=False, first_interac
             reply = 'Queue empty.'
         return reminder_msg + reply if reminder_msg else reply
 
-    # 12. Train Info (Free Web Search)
+    # 12. Train Info with memory
     if user_input.startswith('train '):
         parts = user_input.split()
         if len(parts) < 2:
             reply = "Please provide a train number. Example: `train 12951`"
         else:
             train_no = parts[1].strip()
-            query = f"Indian Railways train {train_no} schedule route and status"
-            reply = smart_search(query)
+            last_train[user] = train_no
+            reply = get_train_details(train_no)
+            
+            # Save to history so AI knows what we found
+            profile = load_profile(user)
+            history = profile.get("conversation", [])
+            history.append({"role": "user", "content": user_input})
+            history.append({"role": "assistant", "content": reply})
+            profile["conversation"] = history[-15:] # Prune
+            save_profile(user, profile)
+            
         return reminder_msg + reply if reminder_msg else reply
 
-    # 13. Emotion + General AI
+    elif user_input.lower() in ['details', 'aur batao', 'more', 'aur details', 'aur info']:
+        train_no = last_train.get(user)
+        if train_no:
+            reply = get_train_details(train_no)
+            # Save to history
+            profile = load_profile(user)
+            history = profile.get("conversation", [])
+            history.append({"role": "user", "content": user_input})
+            history.append({"role": "assistant", "content": reply})
+            profile["conversation"] = history[-15:] # Prune
+            save_profile(user, profile)
+        else:
+            reply = "Aapne pehle koi train number nahi poochha. Pehle 'train 12791' jaise command do."
+        return reminder_msg + reply if reminder_msg else reply
+
+    # 13. Emotion + General AI with Memory
+    profile = load_profile(user)
+    history = profile.get("conversation", [])
+    
+    # Append user input to history
+    history.append({"role": "user", "content": user_input})
+    
+    # Prune history (keep last 15 messages for context)
+    if len(history) > 15:
+        history = history[-15:]
+    
     emotion = detect_emotion(user_input)
     emotion_prefix = ""
     if emotion == 'sad':
@@ -499,7 +545,17 @@ def process_command(user_input, user="akram", from_telegram=False, first_interac
     elif emotion == 'happy':
         emotion_prefix = "That's great! "
 
-    ai_reply = ask_nvidia(user_input, system_message=get_system_message(first_interaction))
+    # Prepare messages for API
+    system_msg = get_system_message(first_interaction)
+    messages = [{"role": "system", "content": system_msg}] + history
+    
+    ai_reply = ask_nvidia(messages)
+    
+    # Append AI reply to history
+    history.append({"role": "assistant", "content": ai_reply})
+    profile["conversation"] = history
+    save_profile(user, profile)
+    
     final_reply = emotion_prefix + (reminder_msg + ai_reply if reminder_msg else ai_reply)
     return final_reply
 
