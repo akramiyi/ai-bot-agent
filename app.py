@@ -436,7 +436,7 @@ def get_youtube_embed_url(query):
 # ─────────────────────────────────────────────
 # THE HTML — ALL 7 UPGRADES INCLUDED
 # ─────────────────────────────────────────────
-HTML = """<!DOCTYPE html>
+HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -445,6 +445,7 @@ HTML = """<!DOCTYPE html>
     <!-- UPGRADE 5: PWA manifest inline -->
     <link rel="manifest" href="/manifest.json">
     <meta name="theme-color" content="#020408">
+    <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;800;900&family=Share+Tech+Mono&family=Rajdhani:wght@300;400;500;700&display=swap" rel="stylesheet">
@@ -929,8 +930,8 @@ document.getElementById('loginPass').addEventListener('keypress', e => {
 function formatMsg(t) {
     if (!t) return '';
     return t
-        .replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>')
-        .replace(/\\*(.+?)\\*/g, '<em>$1</em>')
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.+?)\*/g, '<em>$1</em>')
         .replace(/`(.+?)`/g, '<code style="background:rgba(0,240,255,0.1);padding:2px 6px;border-radius:4px;font-family:monospace;">$1</code>')
         .replace(/\[(.+?)\]\((.+?)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
         .replace(/\n/g, '<br>');
