@@ -929,8 +929,8 @@ document.getElementById('loginPass').addEventListener('keypress', e => {
 function formatMsg(t) {
     if (!t) return '';
     return t
-        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-        .replace(/\*(.+?)\*/g, '<em>$1</em>')
+        .replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>')
+        .replace(/\\*(.+?)\\*/g, '<em>$1</em>')
         .replace(/`(.+?)`/g, '<code style="background:rgba(0,240,255,0.1);padding:2px 6px;border-radius:4px;font-family:monospace;">$1</code>')
         .replace(/\[(.+?)\]\((.+?)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
         .replace(/\n/g, '<br>');
