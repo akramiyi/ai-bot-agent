@@ -1293,9 +1293,9 @@ def stop_study():
     study_state["remaining"] = 0
     return jsonify({"status": "stopped"})
 
-@app.route('/study-status')
-def study_status():
-    return jsonify({"remaining": study_state["remaining"], "total": study_state["total"]})
+@app.route('/health')
+def health_check():
+    return "Astra Level 9 is alive!", 200
 
 @app.route('/stock', methods=['POST'])
 def stock_route():
