@@ -8,6 +8,12 @@ import requests
 import xml.etree.ElementTree as ET
 import warnings
 import threading
+import sys
+
+# ---------- Kill-Switch (Safety for Render) ----------
+# Block any accidental Gemini/Claude/Anthropic calls if they exist in sub-dependencies
+sys.modules['google.generativeai'] = None
+sys.modules['anthropic'] = None
 warnings.filterwarnings("ignore")
 
 from openai import OpenAI
@@ -771,10 +777,16 @@ def process_command(command):
         city = command.replace("weather", "").replace("mausam", "").replace("in", "").replace("of", "").strip() or "Delhi"
         speak(get_weather(city))
 
-    # -------- NEWS --------
+    # -------- NEWS (supports topic search) --------
     elif "news" in command or "khabar" in command:
-        speak("Top headlines la raha hoon 📰")
-        news_list = get_news()
+        topic = None
+        if command.startswith("news "):
+            topic = command.replace("news ", "").strip()
+        elif "news about " in command:
+            topic = command.split("news about ")[-1].strip()
+        
+        speak("Searching news... 📰") if topic else speak("Top headlines la raha hoon 📰")
+        news_list = get_news(query=topic)
         for i, n in enumerate(news_list):
             speak(f"News {i+1}: {n}")
 
@@ -902,15 +914,35 @@ def get_weather(city):
     except:
         return "Weather update fetch nahi ho paya"
 
-def get_news():
-    KEY = "YOUR_NEWS_API_KEY" # Placeholder
+def get_news(query=None, country="in"):
+    """Fetch news headlines – either top headlines or search by query (GNews)"""
+    api_key = os.getenv('GNEWS_API_KEY') or os.getenv('NEWS_API_KEY')
+    if not api_key:
+        return ["⚠️ News API key missing. Please add GNEWS_API_KEY."]
+
+    if query:
+        url = f"https://gnews.io/api/v4/search?q={urllib.parse.quote(query)}&token={api_key}&lang=en&max=5"
+    else:
+        url = f"https://gnews.io/api/v4/top-headlines?country={country}&token={api_key}&max=5"
+
     try:
-        url = f"https://newsapi.org/v2/top-headlines?country=in&apiKey={KEY}"
-        data = requests.get(url).json()
-        articles = data.get("articles", [])[:3]
-        return [a["title"] for a in articles]
-    except:
-        return ["News unavailable..."]
+        resp = requests.get(url, timeout=10)
+        data = resp.json()
+        
+        if data.get('errors'):
+            return [f"📰 News error: {data['errors'][0]}"]
+        
+        articles = data.get('articles', [])
+        if not articles:
+            if query:
+                return [f"📰 No news found for '{query}'."]
+            else:
+                return ["📰 No top news found."]
+        
+        return [art.get('title', 'No title') for art in articles[:3]]
+    
+    except Exception as e:
+        return [f"❌ News error: {str(e)}"]
 
 if __name__ == "__main__":
     # Old start logic (replaced by ui.py)

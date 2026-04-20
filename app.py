@@ -6,33 +6,45 @@ import urllib.parse
 import threading
 import time
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, render_template_string, session
+from flask import Flask, request, jsonify, render_template_string, Response, stream_with_context
 from openai import OpenAI
 import yt_dlp
 from dotenv import load_dotenv
 from dateparser import parse
-from bs4 import BeautifulSoup
-from duckduckgo_search import DDGS
-import telegram
-from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from functools import lru_cache, wraps
+
+# ---------- Kill-Switch (Safety for Render) ----------
+import sys
+# Block any accidental Gemini/Claude/Anthropic calls if they exist in sub-dependencies
+sys.modules['google.generativeai'] = None
+sys.modules['anthropic'] = None
 
 load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'astra-secret-888-chhapra')
 
-# ---------- Interaction Tracking ----------
-telegram_greeted = {}  # chat_id -> bool
-last_train = {}        # user -> last_train_number
-train_cache = {}      # train_number -> search_result
-
 # ---------- Configuration ----------
 PROFILES_DIR = 'profiles'
-REMINDER_CHECK_INTERVAL = 3600  # seconds
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-TELEGRAM_WEBHOOK_URL = os.getenv('TELEGRAM_WEBHOOK_URL', 'https://ai-bot-agent.onrender.com/telegram')
+REMINDER_CHECK_INTERVAL = 3600
 os.makedirs(PROFILES_DIR, exist_ok=True)
+
+# ---------- Simple TTL Cache ----------
+def ttl_cache(seconds):
+    """Time-based cache decorator"""
+    def decorator(func):
+        cache = {}
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            key = str(args) + str(kwargs)
+            now = time.time()
+            if key in cache and cache[key]['expires'] > now:
+                return cache[key]['value']
+            result = func(*args, **kwargs)
+            cache[key] = {'value': result, 'expires': now + seconds}
+            return result
+        return wrapper
+    return decorator
 
 # ---------- NVIDIA AI Client ----------
 client = OpenAI(
@@ -40,98 +52,97 @@ client = OpenAI(
     api_key=os.getenv("NVIDIA_API_KEY")
 )
 
-def get_system_message(first_interaction=False):
-    base = (
-        "You are Astra, a highly intelligent and helpful AI assistant for Akram from Chhapra, Bihar. "
-        "Respond in Hinglish (Hindi + English). "
-        "Be direct, concise, and smart. "
-        "Use the provided conversation history to understand the context of follow-up questions. "
-        "Do NOT use placeholders. "
-        "If you don't know something, say 'Mujhe nahi pata' instead of guessing."
-    )
-    if first_interaction:
-        return base + " In your very first reply, greet with 'Asalamlekuim Akram'. After that, NEVER use any greeting again."
-    else:
-        return base + " Do NOT include any greeting like 'Asalamlekuim Akram' in your response. Give a direct, concise answer based on context."
-
-def ask_nvidia(messages):
+def ask_nvidia_stream(prompt, system_message=None):
+    """Streaming version for anti-gravity feel"""
+    if not system_message:
+        system_message = "You are Astra, a highly intelligent and helpful AI assistant for Akram from Chhapra, Bihar. Respond in Hinglish. Be direct, concise, and smart. Greet only in the first turn if instructed."
+    
     try:
         response = client.chat.completions.create(
             model="meta/llama-4-maverick-17b-128e-instruct",
-            messages=messages,
+            messages=[
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": prompt}
+            ],
             temperature=0.7,
-            max_tokens=500
+            max_tokens=500,
+            stream=True
         )
-        return response.choices[0].message.content
+        for chunk in response:
+            if chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
     except Exception as e:
-        return f"AI error: {str(e)}"
+        yield f"AI error: {str(e)}"
 
-# ---------- Web Search with Summarization ----------
-def get_train_details(train_number):
-    """Fetch train schedule and cache results."""
-    if train_number in train_cache:
-        return train_cache[train_number]
-    query = f"Indian Railways train {train_number} schedule route timings stations"
-    result = smart_search(query)
-    train_cache[train_number] = result
-    return result
+# ---------- Cached Weather ----------
+@ttl_cache(600)  # Cache for 10 minutes
+def get_weather(city):
+    api_key = os.getenv('WEATHER_API_KEY')
+    if not api_key:
+        return "Weather API key missing."
+    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
+    try:
+        resp = requests.get(url, timeout=10)
+        data = resp.json()
+        if data.get('cod') != 200:
+            return f"City '{city}' not found."
+        temp = data['main']['temp']
+        desc = data['weather'][0]['description']
+        return f"Weather in {city.title()}: {temp}°C, {desc}."
+    except:
+        return "Weather service error."
 
+# ---------- Cached News (GNews) ----------
+@ttl_cache(1800)  # Cache for 30 minutes
+def get_news(query=None, country="in"):
+    api_key = os.getenv('GNEWS_API_KEY') or os.getenv('NEWS_API_KEY')
+    if not api_key:
+        return "News API key missing. Please set GNEWS_API_KEY or NEWS_API_KEY in Render."
+    
+    # Use GNews API if available, otherwise fallback logic can be added
+    # For now, following the GNews URL structure provided
+    if query:
+        url = f"https://gnews.io/api/v4/search?q={urllib.parse.quote(query)}&token={api_key}&lang=en&max=5"
+    else:
+        url = f"https://gnews.io/api/v4/top-headlines?country={country}&token={api_key}&max=5"
+    
+    try:
+        resp = requests.get(url, timeout=10)
+        data = resp.json()
+        if data.get('errors'):
+            return f"News error: {data['errors'][0]}"
+        articles = data.get('articles', [])
+        if not articles:
+            return "No news found. Try a different keyword."
+        news_list = []
+        for art in articles[:5]:
+            title = art.get('title', 'No title')
+            link = art.get('url', '#')
+            news_list.append(f"📰 **{title}**\n🔗 [Read more]({link})\n")
+        return "\n".join(news_list)
+    except Exception as e:
+        # Fallback to NewsAPI logic if GNews fails and it's a NewsAPI key
+        if "newsapi.org" not in locals(): # Placeholder for fallback logic
+             return f"News error: {e}"
+
+# ---------- Smart Web Search ----------
 def smart_search(query):
     try:
+        from duckduckgo_search import DDGS
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=3))
             if not results:
                 return "No results found."
             context = "\n".join([f"- {r['title']}: {r['body']}" for r in results])
             prompt = f"Summarize the following search results about '{query}' in 2-3 sentences in Hinglish:\n{context}"
-            # For summarization, we use a single turn call
-            messages = [
-                {"role": "system", "content": "You are a helpful summarizer."},
-                {"role": "user", "content": prompt}
-            ]
-            summary = ask_nvidia(messages)
+            summary = ask_nvidia_stream(prompt, "You are a helpful summarizer.")
+            summary_text = ""
+            for chunk in summary:
+                summary_text += chunk
             links = "\n".join([f"🔗 {r['title']}: {r['href']}" for r in results])
-            return f"{summary}\n\nSource links:\n{links}"
-    except Exception as e:
-        return web_search_simple(query)
-
-def web_search_simple(query):
-    try:
-        url = "https://api.duckduckgo.com/"
-        params = {"q": query, "format": "json", "no_html": 1, "skip_disambig": 1}
-        response = requests.get(url, params=params, timeout=10)
-        data = response.json()
-        if data.get("AbstractText"):
-            summary = data["AbstractText"]
-            link = data.get("AbstractURL", "")
-            return f"🔍 {summary}\n\nRead more: {link}" if link else f"🔍 {summary}"
-        elif data.get("RelatedTopics"):
-            first = data["RelatedTopics"][0]
-            if "Text" in first:
-                return f"🔍 {first['Text']}"
-        return f"Sorry, I couldn't find detailed info on '{query}'. You can search directly at https://duckduckgo.com/?q={urllib.parse.quote(query)}"
+            return f"{summary_text}\n\nSource links:\n{links}"
     except Exception as e:
         return f"Search error: {e}"
-
-# ---------- News Headlines ----------
-def get_news(category="general", country="in"):
-    api_key = os.getenv('NEWS_API_KEY')
-    if not api_key:
-        return "News API key missing. Please set NEWS_API_KEY."
-    url = f"https://newsapi.org/v2/top-headlines?country={country}&apiKey={api_key}"
-    try:
-        resp = requests.get(url)
-        data = resp.json()
-        if data['status'] == 'ok':
-            articles = data['articles'][:5]
-            news_list = []
-            for art in articles:
-                news_list.append(f"📰 {art['title']}\n{art['url']}\n")
-            return "\n".join(news_list) if news_list else "No news found."
-        else:
-            return f"News API error: {data.get('message', 'Unknown')}"
-    except Exception as e:
-        return f"News error: {e}"
 
 # ---------- User Profile Management ----------
 def get_profile_file(user):
@@ -142,29 +153,19 @@ def load_profile(user="akram"):
     if os.path.exists(file):
         with open(file, 'r') as f:
             return json.load(f)
-    return {
-        "name": user.capitalize(),
-        "memory": {},
-        "graph": {},
-        "reminders": [],
-        "theme": "default",
-        "conversation": []
-    }
+    return {"name": user.capitalize(), "memory": {}, "graph": {}, "reminders": [], "theme": "default"}
 
 def save_profile(user, data):
     with open(get_profile_file(user), 'w') as f:
         json.dump(data, f, indent=2)
 
-# ---------- Reminder Helpers ----------
+# ---------- Reminders ----------
 def add_reminder(user, time_str, message):
     parsed = parse(time_str, settings={'PREFER_DATES_FROM': 'future'})
     if not parsed:
         return False, "Sorry, I couldn't understand the time."
     profile = load_profile(user)
-    profile["reminders"].append({
-        "time": parsed.isoformat(),
-        "message": message
-    })
+    profile["reminders"].append({"time": parsed.isoformat(), "message": message})
     save_profile(user, profile)
     return True, f"Reminder set for {parsed.strftime('%I:%M %p on %b %d')}: {message}"
 
@@ -183,143 +184,6 @@ def check_reminders(user):
     save_profile(user, profile)
     return due
 
-# ---------- Proactive Reminder Thread ----------
-reminder_notifications = []
-def reminder_monitor():
-    while True:
-        time.sleep(REMINDER_CHECK_INTERVAL)
-        for f in os.listdir(PROFILES_DIR):
-            if f.endswith('.json'):
-                user = f[:-5]
-                due = check_reminders(user)
-                for r in due:
-                    reminder_notifications.append((user, r["message"]))
-        default_file = get_profile_file("akram")
-        if not os.path.exists(default_file):
-            due = check_reminders("akram")
-            for r in due:
-                reminder_notifications.append(("akram", r["message"]))
-
-threading.Thread(target=reminder_monitor, daemon=True).start()
-
-# ---------- Knowledge Graph ----------
-def update_graph(user, text):
-    profile = load_profile(user)
-    graph = profile["graph"]
-    text_lower = text.lower()
-    if 'meri sister' in text_lower or 'meri bahan' in text_lower:
-        parts = text.split()
-        for i, word in enumerate(parts):
-            if word in ['hai', 'hain'] and i+1 < len(parts):
-                name = parts[i+1].strip(' .!,?')
-                graph['Akram'] = graph.get('Akram', {})
-                graph['Akram']['sister'] = name
-                save_profile(user, profile)
-                return f"✅ Yaad rakha: Akram ki sister {name} hain."
-    if 'mera jija' in text_lower or 'mera brother in law' in text_lower:
-        parts = text.split()
-        for i, word in enumerate(parts):
-            if word in ['hai', 'hain'] and i+1 < len(parts):
-                name = parts[i+1].strip(' .!,?')
-                graph['Akram'] = graph.get('Akram', {})
-                graph['Akram']['jija'] = name
-                save_profile(user, profile)
-                return f"✅ Yaad rakha: Akram ke jija {name} hain."
-    return None
-
-def query_graph(user, query):
-    profile = load_profile(user)
-    graph = profile["graph"]
-    q = query.lower()
-    if 'sister' in q:
-        sister = graph.get('Akram', {}).get('sister')
-        if sister:
-            return f"Aapki sister {sister} hain."
-    if 'jija' in q or 'brother in law' in q:
-        jija = graph.get('Akram', {}).get('jija')
-        if jija:
-            return f"Aapke jija {jija} hain."
-    return None
-
-# ---------- Image Generation ----------
-def generate_image(prompt):
-    encoded = urllib.parse.quote(prompt)
-    return f"https://image.pollinations.ai/prompt/{encoded}"
-
-# ---------- YouTube ----------
-def get_youtube_metadata(song_name):
-    try:
-        with yt_dlp.YoutubeDL({'quiet': True, 'extract_flat': True}) as ydl:
-            info = ydl.extract_info(f"ytsearch1:{song_name}", download=False)
-            if 'entries' in info and info['entries']:
-                v = info['entries'][0]
-                return {
-                    'url': f"https://www.youtube.com/watch?v={v['id']}",
-                    'title': v['title'],
-                    'thumbnail': f"https://img.youtube.com/vi/{v['id']}/0.jpg"
-                }
-    except:
-        return None
-
-playlist = []  # global queue
-
-# ---------- Weather ----------
-def get_weather(city):
-    api_key = os.getenv('WEATHER_API_KEY')
-    if not api_key:
-        return "Weather API key missing."
-    url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
-    try:
-        resp = requests.get(url)
-        data = resp.json()
-        if data.get('cod') != 200:
-            return f"City '{city}' not found."
-        temp = data['main']['temp']
-        desc = data['weather'][0]['description']
-        return f"Weather in {city.title()}: {temp}°C, {desc}."
-    except:
-        return "Weather service error."
-
-def extract_weather_query(user_input):
-    """Return city name if input looks like a weather query, else None."""
-    user_lower = user_input.lower()
-    # Common patterns
-    patterns = [
-        r'(?:weather|temperature|temp|mausam|taapmaan)\s+(?:in|of|for)?\s*([a-z\s]+)',
-        r'(?:kolkata|delhi|mumbai|patna|chhapra|bangalore|chennai|hyderabad)\s+(?:weather|temperature|temp|mausam)',
-        r'(?:batao|kya hai)\s+(?:weather|temperature|temp|mausam)\s+(?:in|of|for)?\s*([a-z\s]+)',
-        r'([a-z\s]+)\s+(?:ka\s+)?(?:weather|temperature|temp|mausam)',
-        r'(?:aaj ka|today[‘’]?s)?\s*(?:mausam|weather)\s+(?:in|of|for)?\s*([a-z\s]+)',
-    ]
-    for pat in patterns:
-        match = re.search(pat, user_lower)
-        if match:
-            city = match.group(1) if len(match.groups()) > 0 else match.group(0)
-            # Clean up common filler words
-            city = re.sub(r'\b(in|of|for|ka|ki|ke|hai|batao|kya|hai|aaj)\b', '', city)
-            city = city.strip()
-            if city:
-                return city
-    # Also handle direct city name followed by "temp" etc.
-    if 'temp' in user_lower or 'temperature' in user_lower or 'mausam' in user_lower:
-        # Try to extract a known city name
-        known_cities = ['kolkata', 'delhi', 'mumbai', 'patna', 'chhapra', 'bangalore', 'chennai', 'hyderabad']
-        for city in known_cities:
-            if city in user_lower:
-                return city
-    return None
-
-# ---------- Emotion Detection ----------
-def detect_emotion(text):
-    text_lower = text.lower()
-    if any(w in text_lower for w in ['sad', 'depressed', 'unhappy', 'upset']):
-        return 'sad'
-    if any(w in text_lower for w in ['angry', 'frustrated', 'annoyed']):
-        return 'angry'
-    if any(w in text_lower for w in ['happy', 'joy', 'excited', 'great']):
-        return 'happy'
-    return 'neutral'
-
 # ---------- Morning Briefing ----------
 def morning_briefing(user):
     profile = load_profile(user)
@@ -337,241 +201,21 @@ def morning_briefing(user):
         "Start where you are. Use what you have. Do what you can. – Arthur Ashe"
     ]
     quote = random.choice(quotes)
-    song_suggestion = "How about listening to 'Jawan'? 🎵"
-    return f"🌞 Good morning, {profile['name']}!\n\n{weather}\n\n{reminder_text}\n\n💡 {quote}\n\n🎵 {song_suggestion}"
+    return f"🌞 Good morning, {profile['name']}!\n\n{weather}\n\n{reminder_text}\n\n💡 {quote}\n\n🎵 How about listening to 'Jawan'? 🎵"
 
-# ---------- Dynamic Themes ----------
-def load_theme(user):
-    profile = load_profile(user)
-    theme_name = profile.get("theme", "default")
-    themes = {
-        'cyberpunk': {
-            'primary': '#00ff9d',
-            'secondary': '#ff00e5',
-            'bg_gradient': 'radial-gradient(circle at 30% 40%, #0d0b1a, #000000)'
-        },
-        'sunset': {
-            'primary': '#ff6b6b',
-            'secondary': '#ff8e53',
-            'bg_gradient': 'radial-gradient(circle at 70% 20%, #1e3c72, #2a5298)'
-        },
-        'default': {
-            'primary': '#e6b91e',
-            'secondary': '#ffaa33',
-            'bg_gradient': 'radial-gradient(circle at 20% 30%, #0a0f1a, #03060c)'
-        }
-    }
-    return themes.get(theme_name, themes['default'])
-
-def set_theme(user, theme_name):
-    profile = load_profile(user)
-    profile["theme"] = theme_name
-    save_profile(user, profile)
-    return load_theme(user)
-
-# ---------- Core Command Processing (shared) ----------
-def process_command(user_input, user="akram", from_telegram=False, first_interaction=False):
-    if not user_input.strip():
-        return "Kuch boliye."
-
-    # Proactive reminders
-    global reminder_notifications
-    pending = [msg for (u, msg) in reminder_notifications if u == user]
-    reminder_notifications = [(u, msg) for (u, msg) in reminder_notifications if u != user]
-    reminder_msg = ""
-    if pending:
-        reminder_msg = "🔔 **Proactive Reminder:**\n" + "\n".join(pending) + "\n\n"
-
-    # 1. Switch user
-    if not from_telegram and user_input.startswith('switch user '):
-        new_user = user_input[12:].strip().lower()
-        return f"Switched to profile: {new_user.capitalize()}"
-
-    # 2. Theme change
-    if user_input.startswith('set theme '):
-        theme_name = user_input[10:].strip()
-        set_theme(user, theme_name)
-        return f"THEME_CHANGE:{theme_name}" if not from_telegram else f"Theme changed to {theme_name}."
-
-    # 3. Morning briefing
-    if user_input.lower() in ['good morning', 'morning', 'subah']:
-        reply = morning_briefing(user)
-        return reminder_msg + reply if reminder_msg else reply
-
-    # 4. News
-    if 'news' in user_input.lower() or 'khabar' in user_input.lower():
-        reply = get_news()
-        return reminder_msg + reply if reminder_msg else reply
-
-    # 5. Smart search
-    if user_input.startswith('search '):
-        query = user_input[7:].strip()
-        if not query:
-            reply = "What would you like to search?"
-        else:
-            reply = smart_search(query)
-        return reminder_msg + reply if reminder_msg else reply
-
-    # 6. Knowledge Graph
-    graph_update = update_graph(user, user_input)
-    if graph_update:
-        return reminder_msg + graph_update if reminder_msg else graph_update
-    graph_answer = query_graph(user, user_input)
-    if graph_answer:
-        return reminder_msg + graph_answer if reminder_msg else graph_answer
-
-    # 7. Reminders
-    if user_input.startswith('remind me '):
-        text = user_input[10:].strip()
-        match = re.search(r'(?:at|on)?\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm))', text, re.IGNORECASE)
-        if match:
-            time_str = match.group(1)
-            message = text.replace(match.group(0), '').strip()
-            if message.startswith('to '):
-                message = message[3:].strip()
-            if not message:
-                message = "reminder"
-            success, result = add_reminder(user, time_str, message)
-            reply = result if success else f"Error: {result}"
-        else:
-            reply = "Please use format like 'remind me at 5 PM to call mom'."
-        return reminder_msg + reply if reminder_msg else reply
-
-    # 8. Weather (flexible)
-    city = extract_weather_query(user_input)
-    if city:
-        reply = get_weather(city)
-        return reminder_msg + reply if reminder_msg else reply
-
-    # 9. Image generation
-    if user_input.startswith('draw ') or user_input.startswith('generate '):
-        prompt = user_input.replace('draw ', '').replace('generate ', '').strip()
-        if not prompt:
-            reply = "What should I draw?"
-        else:
-            img_url = generate_image(prompt)
-            reply = f"🎨 Here's an image for '{prompt}':<br><img src='{img_url}' style='max-width:100%; border-radius:12px;'>"
-        return reminder_msg + reply if reminder_msg else reply
-
-    # 10. YouTube commands
-    if user_input.startswith('play song ') or user_input.startswith('play '):
-        song = re.sub(r'^(play song |play )', '', user_input).strip()
-        if not song:
-            return "Which song?"
-        meta = get_youtube_metadata(song)
-        if meta:
-            reply = f'🎵 <b>{meta["title"]}</b><br><img src="{meta["thumbnail"]}" width="200"><br><a href="{meta["url"]}" target="_blank" style="background:#ff0000;color:white;padding:8px 16px;text-decoration:none;border-radius:8px;">▶ Play on YouTube</a>'
-        else:
-            reply = f'<a href="https://www.youtube.com/results?search_query={song.replace(" ", "+")}" target="_blank">🔍 Search YouTube for "{song}"</a>'
-        return reminder_msg + reply if reminder_msg else reply
-
-    # 11. Queue
-    global playlist
-    if user_input.startswith('add to queue '):
-        song = user_input.replace('add to queue ', '').strip()
-        playlist.append(song)
-        reply = f'✅ Added "{song}". {len(playlist)} in queue.'
-        return reminder_msg + reply if reminder_msg else reply
-    elif user_input == 'show queue':
-        if not playlist:
-            reply = 'Queue empty.'
-        else:
-            reply = '📋 Queue:<br>' + '<br>'.join(f'{i+1}. {s}' for i,s in enumerate(playlist))
-        return reminder_msg + reply if reminder_msg else reply
-    elif user_input == 'play next':
-        if playlist:
-            song = playlist.pop(0)
-            meta = get_youtube_metadata(song)
-            if meta:
-                reply = f'▶ Now playing: <b>{meta["title"]}</b><br><a href="{meta["url"]}" target="_blank">Play</a>'
-            else:
-                reply = f'Now playing: {song} (link not available)'
-        else:
-            reply = 'Queue empty.'
-        return reminder_msg + reply if reminder_msg else reply
-
-    # 12. Train Info with memory
-    if user_input.startswith('train '):
-        parts = user_input.split()
-        if len(parts) < 2:
-            reply = "Please provide a train number. Example: `train 12951`"
-        else:
-            train_no = parts[1].strip()
-            last_train[user] = train_no
-            reply = get_train_details(train_no)
-            
-            # Save to history so AI knows what we found
-            profile = load_profile(user)
-            history = profile.get("conversation", [])
-            history.append({"role": "user", "content": user_input})
-            history.append({"role": "assistant", "content": reply})
-            profile["conversation"] = history[-15:] # Prune
-            save_profile(user, profile)
-            
-        return reminder_msg + reply if reminder_msg else reply
-
-    elif user_input.lower() in ['details', 'aur batao', 'more', 'aur details', 'aur info']:
-        train_no = last_train.get(user)
-        if train_no:
-            reply = get_train_details(train_no)
-            # Save to history
-            profile = load_profile(user)
-            history = profile.get("conversation", [])
-            history.append({"role": "user", "content": user_input})
-            history.append({"role": "assistant", "content": reply})
-            profile["conversation"] = history[-15:] # Prune
-            save_profile(user, profile)
-        else:
-            reply = "Aapne pehle koi train number nahi poochha. Pehle 'train 12791' jaise command do."
-        return reminder_msg + reply if reminder_msg else reply
-
-    # 13. Emotion + General AI with Memory
-    profile = load_profile(user)
-    history = profile.get("conversation", [])
-    
-    # Append user input to history
-    history.append({"role": "user", "content": user_input})
-    
-    # Prune history (keep last 15 messages for context)
-    if len(history) > 15:
-        history = history[-15:]
-    
-    emotion = detect_emotion(user_input)
-    emotion_prefix = ""
-    if emotion == 'sad':
-        emotion_prefix = "I'm here for you. "
-    elif emotion == 'angry':
-        emotion_prefix = "Let's calm down. "
-    elif emotion == 'happy':
-        emotion_prefix = "That's great! "
-
-    # Prepare messages for API
-    system_msg = get_system_message(first_interaction)
-    messages = [{"role": "system", "content": system_msg}] + history
-    
-    ai_reply = ask_nvidia(messages)
-    
-    # Append AI reply to history
-    history.append({"role": "assistant", "content": ai_reply})
-    profile["conversation"] = history
-    save_profile(user, profile)
-    
-    final_reply = emotion_prefix + (reminder_msg + ai_reply if reminder_msg else ai_reply)
-    return final_reply
-
-# ---------- HTML (Cinematic UI) ----------
+# ---------- HTML (Cinematic UI with Streaming) ----------
 HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Astra | Cinematic HUD</title>
+    <title>Astra | Anti-Gravity HUD</title>
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;800&family=Poppins:wght@300;400;500;600&display=swap" rel="stylesheet">
     <style>
         :root {
-            --primary: #e6b91e;
-            --secondary: #ffaa33;
-            --bg-gradient: radial-gradient(circle at 20% 30%, #0a0f1a, #03060c);
+            --primary: #00ff9d;
+            --secondary: #ff00e5;
+            --bg-gradient: radial-gradient(circle at 30% 40%, #0d0b1a, #000000);
         }
         * {
             margin: 0;
@@ -616,12 +260,12 @@ HTML = """<!DOCTYPE html>
             backdrop-filter: blur(12px);
             border-radius: 32px;
             border: 1px solid var(--primary);
-            box-shadow: 0 25px 45px rgba(0,0,0,0.3), 0 0 20px rgba(230,185,30,0.2);
+            box-shadow: 0 25px 45px rgba(0,0,0,0.3), 0 0 20px rgba(0,255,157,0.2);
             z-index: 2;
         }
         .header {
             padding: 20px 30px;
-            border-bottom: 1px solid rgba(230,185,30,0.2);
+            border-bottom: 1px solid rgba(0,255,157,0.2);
             text-align: center;
         }
         .header h1 {
@@ -636,7 +280,7 @@ HTML = """<!DOCTYPE html>
         .badge {
             display: inline-block;
             margin-top: 8px;
-            background: rgba(230,185,30,0.2);
+            background: rgba(0,255,157,0.2);
             padding: 4px 12px;
             border-radius: 20px;
             font-size: 0.7rem;
@@ -681,13 +325,12 @@ HTML = """<!DOCTYPE html>
             background: linear-gradient(135deg, var(--primary), var(--secondary));
             color: #0a0f1a;
             border-bottom-right-radius: 4px;
-            box-shadow: 0 2px 8px rgba(230,185,30,0.3);
         }
         .bot {
             align-self: flex-start;
             background: rgba(30, 35, 50, 0.8);
             backdrop-filter: blur(4px);
-            border: 1px solid rgba(230,185,30,0.3);
+            border: 1px solid rgba(0,255,157,0.3);
             color: #e0e0e0;
             border-bottom-left-radius: 4px;
         }
@@ -715,14 +358,14 @@ HTML = """<!DOCTYPE html>
         }
         .input-area {
             padding: 20px;
-            border-top: 1px solid rgba(230,185,30,0.2);
+            border-top: 1px solid rgba(0,255,157,0.2);
             display: flex;
             gap: 12px;
         }
         .input-area input {
             flex: 1;
             background: rgba(10, 15, 26, 0.6);
-            border: 1px solid rgba(230,185,30,0.4);
+            border: 1px solid rgba(0,255,157,0.4);
             border-radius: 40px;
             padding: 14px 20px;
             font-family: 'Poppins', sans-serif;
@@ -733,7 +376,7 @@ HTML = """<!DOCTYPE html>
         }
         .input-area input:focus {
             border-color: var(--primary);
-            box-shadow: 0 0 12px rgba(230,185,30,0.4);
+            box-shadow: 0 0 12px rgba(0,255,157,0.4);
         }
         .input-area button {
             background: linear-gradient(135deg, var(--primary), var(--secondary));
@@ -749,7 +392,7 @@ HTML = """<!DOCTYPE html>
         }
         .input-area button:hover {
             transform: scale(1.02);
-            box-shadow: 0 4px 12px rgba(230,185,30,0.5);
+            box-shadow: 0 4px 12px rgba(0,255,157,0.5);
         }
         @media (max-width: 600px) {
             .msg { max-width: 90%; font-size: 0.85rem; }
@@ -757,36 +400,13 @@ HTML = """<!DOCTYPE html>
             .input-area input, .input-area button { padding: 12px 16px; }
         }
     </style>
-    <script>
-        // Better error reporting for mobile
-        window.onerror = function(msg, url, line) {
-            console.error("Global error: " + msg + " at " + line);
-            return false;
-        };
-
-        window.addEventListener('load', () => {
-            const starsContainer = document.getElementById('stars');
-            for (let i = 0; i < 150; i++) {
-                const star = document.createElement('div');
-                star.classList.add('star');
-                const size = Math.random() * 3 + 1;
-                star.style.width = size + 'px';
-                star.style.height = size + 'px';
-                star.style.left = Math.random() * 100 + '%';
-                star.style.top = Math.random() * 100 + '%';
-                star.style.animationDelay = Math.random() * 5 + 's';
-                star.style.animationDuration = Math.random() * 3 + 2 + 's';
-                starsContainer.appendChild(star);
-            }
-        });
-    </script>
 </head>
 <body>
     <div class="stars" id="stars"></div>
     <div class="container">
         <div class="header">
-            <h1>▲ ASTRA LEVEL 8</h1>
-            <div class="badge">CINEMATIC INTERFACE | NVIDIA CORE</div>
+            <h1>▲ ASTRA ANTI-GRAVITY</h1>
+            <div class="badge">STREAMING | CACHED | INSTANT</div>
         </div>
         <div class="chat" id="chat"></div>
         <div class="input-area">
@@ -806,7 +426,7 @@ HTML = """<!DOCTYPE html>
             if (isTyping) {
                 div.innerHTML = `<div class="typing"><span></span><span></span><span></span></div>`;
             } else {
-                div.innerHTML = text;
+                div.innerHTML = text.replace(/\\n/g, '<br>');
             }
             chat.appendChild(div);
             chat.scrollTop = chat.scrollHeight;
@@ -814,30 +434,55 @@ HTML = """<!DOCTYPE html>
         }
 
         window.addEventListener('load', () => {
+            const starsContainer = document.getElementById('stars');
+            for (let i = 0; i < 150; i++) {
+                const star = document.createElement('div');
+                star.classList.add('star');
+                const size = Math.random() * 3 + 1;
+                star.style.width = size + 'px';
+                star.style.height = size + 'px';
+                star.style.left = Math.random() * 100 + '%';
+                star.style.top = Math.random() * 100 + '%';
+                star.style.animationDelay = Math.random() * 5 + 's';
+                star.style.animationDuration = Math.random() * 3 + 2 + 's';
+                starsContainer.appendChild(star);
+            }
             addMessage('bot', '🖖 Asalamlekuim Akram! How can I help you today? 😊');
         });
 
-        let typingDiv = null;
         async function send() {
             const text = input.value.trim();
             if (!text) return;
             addMessage('user', text);
             input.value = '';
-            typingDiv = addMessage('bot', '', true);
+            
+            const typingDiv = addMessage('bot', '', true);
+            
             try {
-                const res = await fetch('/ask', {
+                const response = await fetch('/ask-stream', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({message: text})
                 });
-                const data = await res.json();
-                const reply = data.reply || 'No response.';
-                if (typingDiv) typingDiv.remove();
-                addMessage('bot', reply);
-                if (data.theme) {
-                    document.documentElement.style.setProperty('--primary', data.theme.primary);
-                    document.documentElement.style.setProperty('--secondary', data.theme.secondary);
-                    document.documentElement.style.setProperty('--bg-gradient', data.theme.bg_gradient);
+                
+                typingDiv.remove();
+                
+                const botDiv = addMessage('bot', '', false);
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let fullText = '';
+                
+                while (true) {
+                    const {done, value} = await reader.read();
+                    if (done) break;
+                    const chunk = decoder.decode(value);
+                    fullText += chunk;
+                    botDiv.innerHTML = fullText.replace(/\\n/g, '<br>');
+                    chat.scrollTop = chat.scrollHeight;
+                }
+                
+                if (!fullText) {
+                    botDiv.innerHTML = 'Sorry, no response.';
                 }
             } catch (err) {
                 if (typingDiv) typingDiv.remove();
@@ -847,10 +492,6 @@ HTML = """<!DOCTYPE html>
 
         let recognition = null;
         function startVoice() {
-            if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
-                alert("🎤 Voice input requires HTTPS. Please use a secure connection.");
-                return;
-            }
             if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
                 addMessage('bot', 'Sorry, your browser does not support voice input.');
                 return;
@@ -859,23 +500,12 @@ HTML = """<!DOCTYPE html>
             recognition = new SpeechRecognition();
             recognition.lang = 'hi-IN';
             recognition.interimResults = false;
-            recognition.onstart = () => {
-                input.placeholder = "Listening...";
-                document.querySelector('button[onclick="startVoice()"]').style.boxShadow = "0 0 15px #e6b91e";
-            };
             recognition.onresult = (event) => {
                 const text = event.results[0][0].transcript;
                 input.value = text;
                 send();
             };
-            recognition.onerror = (e) => {
-                console.error("Speech error:", e);
-                addMessage('bot', 'Voice error: ' + e.error);
-            };
-            recognition.onend = () => {
-                input.placeholder = "Ask Astra...";
-                document.querySelector('button[onclick="startVoice()"]').style.boxShadow = "none";
-            };
+            recognition.onerror = () => addMessage('bot', 'Voice recognition error.');
             recognition.start();
         }
 
@@ -887,67 +517,59 @@ HTML = """<!DOCTYPE html>
 </html>
 """
 
+# ---------- Routes ----------
 @app.route('/')
 def index():
-    theme = load_theme("akram")
-    return render_template_string(HTML, theme=theme)
+    return render_template_string(HTML)
 
-@app.route('/ask', methods=['POST'])
-def ask():
+@app.route('/ask-stream', methods=['POST'])
+def ask_stream():
     data = request.get_json()
     user_input = data.get('message', '').strip()
     if not user_input:
-        return jsonify({'reply': 'Kuch boliye.'})
-
-    if user_input.startswith('switch user '):
-        new_user = user_input[12:].strip().lower()
-        app.current_user = new_user
-        load_profile(new_user)
-        session['greeted'] = False
-        return jsonify({'reply': f"Switched to profile: {new_user.capitalize()}"})
-
-    user = getattr(app, 'current_user', 'akram')
-    first = not session.get('greeted', False)
-    if first:
-        session['greeted'] = True
-    reply = process_command(user_input, user, from_telegram=False, first_interaction=first)
+        return Response("Kuch boliye.", mimetype='text/plain')
     
-    # Handle theme change (extra check for web response)
-    if reply.startswith("THEME_CHANGE:"):
-        theme_name = reply[13:]
-        theme = load_theme(user)
-        return jsonify({'reply': f"Theme changed to {theme_name}.", 'theme': theme})
+    def generate():
+        user_lower = user_input.lower()
+        
+        # Weather command
+        if any(w in user_lower for w in ['weather', 'temp', 'mausam', 'taapmaan']):
+            city = "Chhapra"
+            known_cities = ['delhi', 'mumbai', 'kolkata', 'chennai', 'bangalore', 'patna', 'chhapra', 'london', 'new york']
+            for c in known_cities:
+                if c in user_lower:
+                    city = c
+                    break
+            yield get_weather(city)
+            return
+        
+        # News command
+        if 'news' in user_lower or 'khabar' in user_lower:
+            query = None
+            if user_lower.startswith('news '):
+                query = user_input[5:].strip()
+            elif 'news about ' in user_lower:
+                query = user_lower.split('news about ')[-1].strip()
+            yield get_news(query=query)
+            return
+        
+        # Morning briefing
+        if any(w in user_lower for w in ['good morning', 'morning', 'subah']):
+            yield morning_briefing("akram")
+            return
+
+        # General AI with streaming
+        for chunk in ask_nvidia_stream(user_input):
+            yield chunk
     
-    return jsonify({'reply': reply})
+    return Response(stream_with_context(generate()), mimetype='text/plain')
 
 @app.route('/telegram', methods=['GET', 'POST'])
 def telegram_webhook():
     if request.method == 'GET':
-        return "🤖 Astra Telegram Webhook is ACTIVE and waiting for POST requests.", 200
-
-    data = request.get_json()
-    if not data or 'message' not in data:
-        return "OK", 200
-
-    chat_id = data['message']['chat']['id']
-    user_text = data['message'].get('text', '').strip()
-    if not user_text:
-        return "OK", 200
-
-    first = not telegram_greeted.get(chat_id, False)
-    if first:
-        telegram_greeted[chat_id] = True
-        
-    reply = process_command(user_text, user="akram", from_telegram=True, first_interaction=first)
-
-    token = os.getenv('TELEGRAM_BOT_TOKEN')
-    if token:
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        # Format reply for Telegram (remove some HTML not supported, keep B/A)
-        clean_reply = reply.replace('<br>', '\n')
-        requests.post(url, json={'chat_id': chat_id, 'text': clean_reply, 'parse_mode': 'HTML'})
+        return "🤖 Astra Anti-Gravity Webhook is ACTIVE", 200
     return "OK", 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, threaded=True)
