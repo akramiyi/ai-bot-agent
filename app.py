@@ -148,6 +148,19 @@ def get_weather(city):
         return f"☁️ {city.title()}: {temp}°C, {desc}."
     except: return "Weather check failed."
 
+# ---------- YouTube Mini-Player Helper ----------
+def get_youtube_embed_url(query):
+    """Get YouTube embed URL for a search query"""
+    try:
+        with yt_dlp.YoutubeDL({'quiet': True, 'extract_flat': True}) as ydl:
+            info = ydl.extract_info(f"ytsearch1:{query}", download=False)
+            if 'entries' in info and info['entries']:
+                video_id = info['entries'][0]['id']
+                return f"https://www.youtube.com/embed/{video_id}?autoplay=1&controls=1&rel=0"
+    except:
+        pass
+    return None
+
 # ---------- HTML (Cinematic Level 9 HUD) ----------
 HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -177,6 +190,11 @@ HTML = """<!DOCTYPE html>
         /* Widgets */
         #studyWidget { position: fixed; top: 20px; right: 20px; background: rgba(255,0,229,0.15); border: 1px solid var(--s); padding: 15px; border-radius: 20px; backdrop-filter: blur(10px); display: none; text-align: center; width: 150px; z-index: 10; }
         #studyTimer { font-family: 'Orbitron'; font-size: 1.8rem; color: #fff; margin: 5px 0; }
+        
+        #musicPlayer { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.8); backdrop-filter: blur(10px); border-radius: 16px; border: 1px solid var(--p); display: none; z-index: 100; overflow: hidden; box-shadow: 0 0 20px var(--p); }
+        #musicPlayer iframe { width: 300px; height: 170px; border: none; }
+        .close-music { position: absolute; top: 5px; right: 5px; background: var(--s); border: none; border-radius: 50%; width: 22px; height: 22px; color: white; cursor: pointer; font-size: 12px; z-index: 101; }
+
         .ticker { position: fixed; bottom: 0; left: 0; width: 100%; background: rgba(0,255,157,0.05); font-family: 'Orbitron'; font-size: 0.7rem; padding: 5px; overflow: hidden; white-space: nowrap; border-top: 1px solid rgba(0,255,157,0.1); }
         .ticker-inner { display: inline-block; animation: ticker 30s linear infinite; }
         @keyframes ticker { from { transform: translateX(100%); } to { transform: translateX(-100%); } }
@@ -188,6 +206,10 @@ HTML = """<!DOCTYPE html>
         <div style="font-size: 0.6rem; color: var(--s);">STUDY MODE</div>
         <div id="studyTimer">25:00</div>
         <button onclick="stopStudy()" style="font-size: 0.6rem; padding: 5px 10px; background: var(--s);">STOP</button>
+    </div>
+    <div id="musicPlayer">
+        <button class="close-music" onclick="closeMusic()">✕</button>
+        <iframe id="musicIframe" src="" allow="autoplay"></iframe>
     </div>
     <div class="container">
         <div class="header">
@@ -233,13 +255,41 @@ HTML = """<!DOCTYPE html>
                 const reader = resp.body.getReader();
                 const decoder = new TextDecoder();
                 botDiv.innerHTML = '';
+                let fullText = '';
+                let musicUrl = null;
+
                 while (true) {
                     const {done, value} = await reader.read();
                     if (done) break;
-                    botDiv.innerHTML += decoder.decode(value).replace(/\\n/g, '<br>');
+                    const chunk = decoder.decode(value);
+                    if (chunk.startsWith('{') && chunk.includes('music_url')) {
+                        try {
+                            const data = JSON.parse(chunk);
+                            if (data.music_url) musicUrl = data.music_url;
+                            if (data.message) fullText += data.message;
+                        } catch(e) { fullText += chunk; }
+                    } else {
+                        fullText += chunk;
+                    }
+                    botDiv.innerHTML = fullText.replace(/\\n/g, '<br>');
                     chat.scrollTop = chat.scrollHeight;
                 }
+                if (musicUrl) showMusicPlayer(musicUrl);
             } catch { botDiv.innerHTML = 'Connection Error.'; }
+        }
+
+        function showMusicPlayer(url) {
+            const player = document.getElementById('musicPlayer');
+            const iframe = document.getElementById('musicIframe');
+            iframe.src = url;
+            player.style.display = 'block';
+        }
+
+        function closeMusic() {
+            const player = document.getElementById('musicPlayer');
+            const iframe = document.getElementById('musicIframe');
+            iframe.src = '';
+            player.style.display = 'none';
         }
 
         function stopStudy() { fetch('/stop-study', {method: 'POST'}); }
@@ -323,6 +373,25 @@ def ask_stream():
             if 'ethereum' in low or 'eth' in low: coin = 'ethereum'
             elif 'solana' in low or 'sol' in low: coin = 'solana'
             yield get_crypto_price(coin)
+            return
+
+        # YouTube Music Command
+        if low.startswith('play song ') or low.startswith('play '):
+            song = low.replace('play song ', '').replace('play ', '').strip()
+            if not song:
+                yield "Kaunsa gaana chahiye? Song name batao."
+            else:
+                query = f"{song} song"
+                embed_url = get_youtube_embed_url(query)
+                if embed_url:
+                    import json
+                    yield json.dumps({
+                        "message": f"🎵 **Playing: {song}**\nEnjoy the music! 🎧",
+                        "music_url": embed_url
+                    })
+                else:
+                    search_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(song)}"
+                    yield f"🎵 Could not play directly. [Click here to search on YouTube]({search_url})"
             return
 
         # Study Mode
