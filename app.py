@@ -87,7 +87,7 @@ def get_stock_price(symbol):
         currency = res['currency']
         change = res.get('regularMarketChange', 0)
         return f"📈 **{symbol.replace('.NS','')}**\nPrice: {currency} {price:,.2f}\nChange: {change:+.2f}"
-    exceptException as e:
+    except Exception as e:
         return f"Could not fetch stock {symbol}."
 
 @ttl_cache(300)
