@@ -128,8 +128,7 @@ def init_firebase():
     except Exception as e:
         print(f"⚠️ Firebase init error: {e}")
 
-# Move init to background so gunicorn starts instantly
-threading.Thread(target=init_firebase, daemon=True).start()
+init_firebase()
 
 # Local memory fallback
 _local_memory = {}
