@@ -12,6 +12,7 @@ from flask import Flask, request, jsonify, render_template_string, Response, str
 from openai import OpenAI
 import yt_dlp
 from functools import wraps
+from dotenv import load_dotenv
 import asyncio
 import edge_tts
 import tempfile
