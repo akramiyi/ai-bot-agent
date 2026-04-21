@@ -468,6 +468,10 @@ HTML = r"""<!DOCTYPE html>
         #installBanner{display:none;position:fixed;bottom:14px;left:50%;transform:translateX(-50%);background:rgba(2,4,8,.96);border:1px solid var(--a);border-radius:10px;padding:10px 18px;z-index:998;align-items:center;gap:10px;font-family:'Orbitron',monospace;font-size:0.65rem;color:var(--a);white-space:nowrap;}
         #installBanner.show{display:flex;}
         #installBanner button{background:var(--a);border:none;color:#020408;font-family:'Orbitron',monospace;font-size:.6rem;font-weight:700;padding:5px 12px;border-radius:5px;cursor:pointer;}
+        /* BRIEFING */
+        #briefingPanel{overflow-y:auto;}
+        @keyframes skelPulse{0%,100%{opacity:.3;}50%{opacity:.7;}}
+        .skel-line{background:rgba(0,240,255,0.15);animation:skelPulse 1.4s ease-in-out infinite;}
         @media(max-width:600px){
             .logo{font-size:.9rem;}
             .msg{max-width:93%;font-size:.82rem;}
@@ -509,6 +513,7 @@ HTML = r"""<!DOCTYPE html>
         <button class="tab-btn" onclick="switchTab('study',this)">📚 STUDY</button>
         <button class="tab-btn" onclick="switchTab('stocks',this)">📈 STOCKS</button>
         <button class="tab-btn" onclick="switchTab('music',this)">🎵 MUSIC</button>
+        <button class="tab-btn" onclick="switchTab('briefing',this)">🌅 BRIEF</button>
         <button class="tab-btn" onclick="switchTab('tools',this)">🛠 TOOLS</button>
         <button class="tab-btn" onclick="switchTab('memory',this)">🧠 MEM</button>
     </div>
@@ -670,6 +675,31 @@ HTML = r"""<!DOCTYPE html>
         <div class="np-label" id="npLabel"></div>
     </div>
 
+    <!-- DAILY BRIEFING -->
+    <div class="panel" id="briefingPanel">
+        <div style="padding:12px;display:flex;flex-direction:column;gap:10px;overflow-y:auto;flex:1;">
+            <div style="background:rgba(0,240,255,0.04);border:1px solid rgba(0,240,255,0.14);border-radius:8px;padding:14px;text-align:center;">
+                <div style="font-family:'Orbitron',monospace;font-size:0.75rem;color:var(--p);letter-spacing:2px;">🌅 DAILY BRIEFING</div>
+                <div style="font-family:'Share Tech Mono',monospace;font-size:0.65rem;color:var(--dim);margin-top:4px;" id="briefTime">Loading...</div>
+            </div>
+            <button onclick="loadBriefing()" id="briefBtn" style="background:linear-gradient(135deg,var(--p),#007799);border:none;border-radius:8px;padding:13px;font-family:'Orbitron',monospace;font-size:0.7rem;font-weight:700;color:#020408;cursor:pointer;letter-spacing:2px;width:100%;">⚡ GENERATE TODAY'S BRIEFING</button>
+            <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(0,240,255,0.03);border:1px solid rgba(0,240,255,0.1);border-radius:8px;padding:10px 14px;">
+                <span style="font-family:'Share Tech Mono',monospace;font-size:0.7rem;color:var(--dim);">🔔 Auto-briefing on open</span>
+                <label style="position:relative;display:inline-block;width:36px;height:20px;">
+                    <input type="checkbox" id="autoToggle" onchange="toggleAuto(this)" style="opacity:0;width:0;height:0;">
+                    <span id="toggleSlider" style="position:absolute;cursor:pointer;inset:0;background:rgba(0,240,255,0.15);border-radius:20px;border:1px solid rgba(0,240,255,0.3);transition:.3s;"></span>
+                </label>
+            </div>
+            <div id="briefingOutput" style="background:rgba(0,0,0,0.3);border:1px solid rgba(0,240,255,0.12);border-radius:8px;padding:14px;font-family:'Share Tech Mono',monospace;font-size:0.75rem;line-height:2;color:var(--text);min-height:200px;display:none;"></div>
+            <div id="briefSkeleton" style="display:none;flex-direction:column;gap:8px;"><div class="skel-line" style="height:14px;width:70%;border-radius:4px;"></div><div class="skel-line" style="height:14px;width:90%;border-radius:4px;"></div><div class="skel-line" style="height:14px;width:60%;border-radius:4px;"></div><div class="skel-line" style="height:14px;width:80%;border-radius:4px;"></div><div class="skel-line" style="height:14px;width:50%;border-radius:4px;"></div></div>
+            <div style="display:none;gap:6px;flex-wrap:wrap;" id="briefActions">
+                <button onclick="qa('Aaj ka detailed study plan banao')" style="flex:1;background:rgba(0,240,255,0.06);border:1px solid rgba(0,240,255,0.15);color:var(--p);font-family:'Share Tech Mono',monospace;font-size:0.65rem;padding:7px;border-radius:6px;cursor:pointer;">📚 Study Plan</button>
+                <button onclick="qa('Aaj ke liye motivational quote do')" style="flex:1;background:rgba(170,255,0,0.06);border:1px solid rgba(170,255,0,0.15);color:var(--a);font-family:'Share Tech Mono',monospace;font-size:0.65rem;padding:7px;border-radius:6px;cursor:pointer;">🔥 Motivate</button>
+                <button onclick="qa('Bitcoin aaj kaisa rahega?')" style="flex:1;background:rgba(255,0,170,0.06);border:1px solid rgba(255,0,170,0.15);color:var(--s);font-family:'Share Tech Mono',monospace;font-size:0.65rem;padding:7px;border-radius:6px;cursor:pointer;">₿ Crypto</button>
+            </div>
+        </div>
+    </div>
+
     <!-- TOOLS -->
     <div class="panel" id="toolsPanel">
         <div class="sub-tabs">
@@ -774,8 +804,38 @@ const ttsBtn=document.getElementById('ttsBtn');ttsBtn.classList.toggle('tts-on',
 function toggleTTS(){ttsOn=!ttsOn;localStorage.setItem('tts_on',ttsOn);ttsBtn.classList.toggle('tts-on',ttsOn);if(ttsOn)speak('Voice reply enabled.');}
 async function speak(text){if(!ttsOn)return;const clean=text.replace(/<[^>]*>/g,'').replace(/[*_`#]/g,'').slice(0,400);try{const r=await fetch(`/speak?text=${encodeURIComponent(clean)}`,{headers:{'Authorization':'Bearer '+token}});if(r.ok){const b=await r.blob();const u=URL.createObjectURL(b);const a=new Audio(u);a.play();}}catch(e){}}
 
+// ── BRIEFING ──
+let autoLoad=localStorage.getItem('astra_auto_brief')==='true';
+function toggleAuto(el){autoLoad=el.checked;localStorage.setItem('astra_auto_brief',autoLoad);const sl=document.getElementById('toggleSlider');sl.style.background=autoLoad?'rgba(170,255,0,0.5)':'rgba(0,240,255,0.15)';}
+function updateBriefTime(){const el=document.getElementById('briefTime');if(!el)return;const now=new Date();const days=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];el.textContent=`${days[now.getDay()]} · ${now.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true})}`;}
+setInterval(updateBriefTime,1000);updateBriefTime();
+async function loadBriefing(){
+    const btn=document.getElementById('briefBtn'),output=document.getElementById('briefingOutput'),skel=document.getElementById('briefSkeleton'),acts=document.getElementById('briefActions');
+    btn.textContent='⏳ Generating...';btn.disabled=true;output.style.display='none';skel.style.display='flex';acts.style.display='none';
+    try{
+        const resp=await fetch('/daily-briefing',{headers:{'Authorization':'Bearer '+token}});
+        if(resp.status===401){doLogout();return;}
+        skel.style.display='none';output.style.display='block';output.innerHTML='';
+        const reader=resp.body.getReader(),dec=new TextDecoder();let full='';
+        while(true){const{done,value}=await reader.read();if(done)break;full+=dec.decode(value);output.innerHTML=fmt(full);output.scrollTop=output.scrollHeight;}
+        acts.style.display='flex';speak(full.split('\n')[0]);
+        await fetch('/memory/save',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify({key:'last_briefing',value:new Date().toLocaleDateString('en-IN')})});
+    }catch(e){skel.style.display='none';output.style.display='block';output.innerHTML='❌ Network error.';}
+    finally{btn.textContent='🔄 REFRESH BRIEFING';btn.disabled=false;}
+}
+
 // ── TABS ──
-function switchTab(n,b){document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));document.getElementById(n+'Panel').classList.add('active');b.classList.add('active');if(n==='memory')loadMem();}
+function switchTab(n,b){
+    document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+    document.getElementById(n+'Panel').classList.add('active');
+    b.classList.add('active');
+    if(n==='memory')loadMem();
+    if(n==='briefing'){
+        const tog=document.getElementById('autoToggle');if(tog){tog.checked=autoLoad;toggleAuto(tog);}
+        if(autoLoad){const ld=localStorage.getItem('brief_last_date'),td=new Date().toLocaleDateString('en-IN');if(ld!==td){localStorage.setItem('brief_last_date',td);loadBriefing();}}
+    }
+}
 function switchSub(n,b){document.querySelectorAll('.sub-view').forEach(v=>v.classList.remove('active'));document.querySelectorAll('#studyPanel .sub-tab').forEach(b=>b.classList.remove('active'));document.getElementById('sv-'+n).classList.add('active');b.classList.add('active');}
 function switchSt(n,b){document.querySelectorAll('#stocksPanel .sub-view').forEach(v=>v.classList.remove('active'));document.querySelectorAll('#stocksPanel .sub-tab').forEach(b=>b.classList.remove('active'));document.getElementById('stv-'+n).classList.add('active');b.classList.add('active');}
 function switchTl(n,b){document.querySelectorAll('#toolsPanel .sub-view').forEach(v=>v.classList.remove('active'));document.querySelectorAll('#toolsPanel .sub-tab').forEach(b=>b.classList.remove('active'));document.getElementById('tlv-'+n).classList.add('active');b.classList.add('active');}
@@ -950,6 +1010,26 @@ def save_memory_route():
     data = request.get_json(); k, v = data.get('key','').strip(), data.get('value','').strip()
     if k and v: save_memory_cloud(get_username_from_request(), k, v); return jsonify({'status':'saved'})
     return jsonify({'error':'Missing key/value'}), 400
+
+# ─── DAILY BRIEFING ───
+@app.route('/daily-briefing', methods=['GET'])
+@require_auth
+def daily_briefing():
+    username = get_username_from_request()
+    def generate():
+        now = datetime.now(); day = now.strftime("%A")
+        date_str = now.strftime("%d %B %Y"); time_str = now.strftime("%I:%M %p")
+        study_plan = {"monday":"Arrays & Searching","tuesday":"Strings & Pattern Matching","wednesday":"Linked List","thursday":"Stack & Queue","friday":"Trees & BST","saturday":"Graphs & DP","sunday":"Revision + Mock Test"}
+        aaj_topic = study_plan.get(day.lower(), "Revision")
+        yield f"🌅 **Good Morning Akram Bhai!**\n📅 {day}, {date_str} | ⏰ {time_str}\n\n"
+        yield "━━━━━━━━━━━━━━━━━━\n🌤️ **WEATHER**\n"; yield get_weather("Chhapra") + "\n\n"
+        yield "━━━━━━━━━━━━━━━━━━\n💰 **MARKETS**\n"; yield get_crypto_price("bitcoin") + "\n"; yield get_crypto_price("ethereum") + "\n\n"
+        yield "━━━━━━━━━━━━━━━━━━\n📰 **TOP NEWS**\n"; yield get_news(country="in") + "\n"
+        yield "━━━━━━━━━━━━━━━━━━\n📚 **AAJ KA TOPIC**\n🎯 {aaj_topic}\n\n"
+        yield "━━━━━━━━━━━━━━━━━━\n🔥 **ASTRA KI BAAT**\n"
+        yield run_ai("You are Astra. Give a short 2-line motivational message in Hinglish for a B.Tech CS student. Use 1-2 emojis. Be energetic.", f"Today is {day}. Topic: {aaj_topic}.") + "\n"
+        yield "\n✅ **Briefing complete! Kaam pe lag ja bhai! 💪**"
+    return Response(stream_with_context(generate()), mimetype='text/plain')
 
 @app.route('/start-study', methods=['POST'])
 @require_auth
